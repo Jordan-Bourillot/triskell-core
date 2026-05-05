@@ -5,12 +5,12 @@ du **Triskell Sales Tunnel** (qui rédige les messages).
 
 ## Pourquoi ce moteur ?
 
-Le Dénicheur couvre uniquement YouTube/Twitch/Reddit avec des limites dures :
+Le Dénicheur (depuis v1.3.0) couvre 9 plateformes créateurs :
+YouTube, Twitch, Reddit, Bluesky, Mastodon, Apple Podcasts, Dailymotion,
+Kick, GitHub. Limites résiduelles :
 - 100 résultats max par recherche YouTube
-- Pas de scraping web (l'email pro est sur le site, pas dans la bio)
-- Aucune source B2B / artisans / commerces (Sirene, Maps)
-- Pas de dédoublonnage cross-source
-- Aucun envoi ni détection de réponses
+- Pas de source B2B / artisans / commerces (Sirene, Maps — gérés par Triskell Command)
+- Le dédoublonnage cross-plateforme est désormais en place (cf. core/relevance.py)
 
 Ce moteur résout chacun de ces points et ferme la boucle de prospection
 **sans intervention humaine au quotidien**, sans toucher à l'app Le Dénicheur.

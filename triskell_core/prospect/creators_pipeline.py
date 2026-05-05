@@ -1,7 +1,8 @@
 """Pipeline nocturne pour Le Dénicheur — créateurs YT/Twitch/Reddit.
 
 Enchaîne sans intervention :
-    1. Search (YouTube + Twitch + Reddit selon ce qui est activé)
+    1. Search (YouTube + Twitch + Reddit + Bluesky + Mastodon + Apple Podcasts
+       + Dailymotion + Kick + GitHub selon ce qui est activé)
     2. Enrichissement web (suit le linktree/site externe → email pro)
     3. Génération IA d'un mail personnalisé pour chaque prospect avec email
     4. Mode AUTO       → envoi SMTP direct
