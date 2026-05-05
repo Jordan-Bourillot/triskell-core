@@ -25,6 +25,12 @@ from .enrichers.linktree import LinktreeFollower, is_hub
 from .enrichers.monetization import is_social_url
 from .enrichers.web import WebEnricher
 from .sources import creators
+from .sources.bluesky import BlueskyAPI
+from .sources.dailymotion import DailymotionAPI
+from .sources.github import GitHubAPI
+from .sources.kick import KickAPI
+from .sources.mastodon import MastodonAPI
+from .sources.podcasts import ApplePodcastsAPI
 from .sources.reddit import RedditAPI
 from .sources.twitch import TwitchAPI
 from .sources.youtube import YouTubeAPI
@@ -82,6 +88,8 @@ class AutopilotConfig:
         "- Tu NE produis PAS de liste de questions à l'utilisateur.\n"
         "- Court (≤ 12 lignes), tutoiement chaleureux mais pro. Objet personnalisé.\n"
         "- Pas d'emoji, pas de jargon, pas de structure 'Not just X but Y'.\n"
+        "- Les produits du catalogue sont DÉJÀ EN VENTE. Ne dis JAMAIS 'nous développons' "
+        "ou 'en cours de développement'. Présente-les comme disponibles dès maintenant.\n"
         "\n"
         "FORMAT DE SORTIE STRICT (rien d'autre, surtout pas de 'Voici l'email :' en préambule) :\n"
         "OBJET : <objet>\n"
@@ -210,6 +218,76 @@ def run_creators_pipeline(
             log(f"  Reddit : +{len(sr) + len(us)} bruts")
         except Exception as e:
             stats["errors"].append(f"reddit: {e}")
+
+    if "bluesky" in cfg.platforms:
+        try:
+            api = BlueskyAPI()
+            actors = api.search_actors(cfg.niche, max_results=cfg.max_per_platform)
+            new_prospects.extend(actors)
+            log(f"  Bluesky : +{len(actors)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"bluesky: {e}")
+
+    if "mastodon" in cfg.platforms:
+        try:
+            api = MastodonAPI(
+                extra_instances=denicheur_cfg.get("mastodon_instances") or [])
+            accounts = api.search_accounts(cfg.niche, max_results=cfg.max_per_platform)
+            new_prospects.extend(accounts)
+            log(f"  Mastodon : +{len(accounts)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"mastodon: {e}")
+
+    if "apple_podcasts" in cfg.platforms:
+        try:
+            api = ApplePodcastsAPI(
+                country=denicheur_cfg.get("apple_podcasts_country") or "FR",
+                lang=denicheur_cfg.get("apple_podcasts_lang") or "fr_fr",
+            )
+            podcasts = api.search_podcasts(
+                cfg.niche, max_results=cfg.max_per_platform,
+                enrich_with_feed=True,
+                feed_enrich_limit=min(20, cfg.max_per_platform),
+            )
+            new_prospects.extend(podcasts)
+            log(f"  Apple Podcasts : +{len(podcasts)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"apple_podcasts: {e}")
+
+    if "dailymotion" in cfg.platforms:
+        try:
+            api = DailymotionAPI()
+            users = api.search_users(cfg.niche, max_results=cfg.max_per_platform)
+            new_prospects.extend(users)
+            log(f"  Dailymotion : +{len(users)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"dailymotion: {e}")
+
+    if "kick" in cfg.platforms:
+        try:
+            api = KickAPI()
+            channels = api.search_channels(
+                cfg.niche, max_results=cfg.max_per_platform,
+                enrich_details=True,
+                enrich_limit=min(15, cfg.max_per_platform),
+            )
+            new_prospects.extend(channels)
+            log(f"  Kick : +{len(channels)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"kick: {e}")
+
+    if "github" in cfg.platforms:
+        try:
+            api = GitHubAPI(denicheur_cfg.get("github_token", ""))
+            users = api.search_users(
+                cfg.niche, max_results=cfg.max_per_platform,
+                in_bio=True, enrich_details=True,
+                enrich_limit=min(30, cfg.max_per_platform),
+            )
+            new_prospects.extend(users)
+            log(f"  GitHub : +{len(users)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"github: {e}")
 
     # Filtre les déjà-connus
     fresh = [p for p in new_prospects if _prospect_key(p) not in existing_keys]

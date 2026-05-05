@@ -39,19 +39,43 @@ class RedditAPI:
             time.sleep(self._min_interval - delta)
         self._last_call = time.time()
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        self._throttle()
-        try:
-            r = requests.get(
-                f"{self.BASE}{path}",
-                headers={"User-Agent": self.user_agent},
-                params=params or {},
-                timeout=15,
-            )
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            raise RuntimeError(f"Reddit a échoué : {e}")
+    def _get(self, path: str, params: dict | None = None,
+             max_retries: int = 3) -> dict:
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            self._throttle()
+            try:
+                r = requests.get(
+                    f"{self.BASE}{path}",
+                    headers={"User-Agent": self.user_agent},
+                    params=params or {},
+                    timeout=15,
+                )
+                # Retry sur 429 / 5xx
+                if r.status_code in (429,) or 500 <= r.status_code < 600:
+                    last_err = RuntimeError(f"HTTP {r.status_code}")
+                    if attempt < max_retries:
+                        retry_after = r.headers.get("Retry-After")
+                        sleep_for = (
+                            float(retry_after)
+                            if retry_after
+                            and retry_after.replace(".", "", 1).isdigit()
+                            else min(8.0, 0.5 * (2 ** attempt))
+                        )
+                        time.sleep(sleep_for)
+                        continue
+                r.raise_for_status()
+                return r.json()
+            except requests.RequestException as e:
+                last_err = e
+                if attempt < max_retries:
+                    time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                    continue
+                break
+            except ValueError as e:  # JSON malformé
+                last_err = e
+                break
+        raise RuntimeError(f"Reddit a échoué : {last_err}")
 
     # ------------------------------------------------------------------
     def search_subreddits(self, query: str, max_results: int = 25) -> list[dict]:

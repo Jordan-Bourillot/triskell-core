@@ -32,32 +32,97 @@ class TwitchAPI:
         return bool(self.client_id and self.client_secret
                     and self.client_id.strip() and self.client_secret.strip())
 
-    def _get_token(self) -> str:
-        if self._token and time.time() < self._token_expires - 60:
+    def _get_token(self, force_refresh: bool = False) -> str:
+        if (not force_refresh) and self._token \
+                and time.time() < self._token_expires - 60:
             return self._token
-        try:
-            r = requests.post(
-                self.OAUTH,
-                params={
-                    "client_id":     self.client_id,
-                    "client_secret": self.client_secret,
-                    "grant_type":    "client_credentials",
-                },
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            raise RuntimeError(f"Twitch OAuth a échoué : {e}")
-        self._token = data.get("access_token", "")
-        self._token_expires = time.time() + int(data.get("expires_in", 3600))
-        return self._token
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    self.OAUTH,
+                    params={
+                        "client_id":     self.client_id,
+                        "client_secret": self.client_secret,
+                        "grant_type":    "client_credentials",
+                    },
+                    timeout=15,
+                )
+                if r.status_code == 401:
+                    raise RuntimeError(
+                        "Twitch OAuth 401 — Client ID ou Secret invalide "
+                        "(re-vérifie dans Réglages)."
+                    )
+                if r.status_code in (429,) or 500 <= r.status_code < 600:
+                    last_err = RuntimeError(f"HTTP {r.status_code}")
+                    time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                    continue
+                r.raise_for_status()
+                data = r.json()
+            except requests.RequestException as e:
+                last_err = e
+                if attempt < 2:
+                    time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                    continue
+                raise RuntimeError(f"Twitch OAuth a échoué : {e}") from e
+            else:
+                self._token = data.get("access_token", "")
+                self._token_expires = (
+                    time.time() + int(data.get("expires_in", 3600))
+                )
+                return self._token
+        raise RuntimeError(f"Twitch OAuth a échoué après 3 tentatives : {last_err}")
 
     def _headers(self) -> dict:
         return {
             "Client-ID":     self.client_id,
             "Authorization": f"Bearer {self._get_token()}",
         }
+
+    def _helix_get(self, path: str, *, params=None,
+                   max_retries: int = 3) -> dict:
+        """GET sur l'API Helix avec retry exponentiel + refresh token sur 401.
+
+        Retry sur 429 / 5xx / network errors. Sur 401, force un refresh OAuth
+        et retente une fois (le token a peut-être expiré entre-temps).
+        """
+        last_err: Exception | None = None
+        token_refreshed = False
+        for attempt in range(max_retries + 1):
+            try:
+                r = requests.get(
+                    f"{self.BASE}{path}",
+                    headers=self._headers(),
+                    params=params or {},
+                    timeout=15,
+                )
+            except requests.RequestException as e:
+                last_err = e
+                if attempt < max_retries:
+                    time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                    continue
+                raise RuntimeError(f"Twitch network: {e}") from e
+            if r.status_code == 401 and not token_refreshed:
+                # Force le refresh OAuth puis retente
+                self._get_token(force_refresh=True)
+                token_refreshed = True
+                continue
+            if r.status_code in (429,) or 500 <= r.status_code < 600:
+                last_err = RuntimeError(f"HTTP {r.status_code}")
+                if attempt < max_retries:
+                    retry_after = r.headers.get("Retry-After")
+                    if retry_after and retry_after.replace(".", "", 1).isdigit():
+                        time.sleep(min(float(retry_after), 8.0))
+                    else:
+                        time.sleep(min(8.0, 0.5 * (2 ** attempt)))
+                    continue
+                raise RuntimeError(f"Twitch HTTP {r.status_code}")
+            r.raise_for_status()
+            try:
+                return r.json()
+            except ValueError as e:
+                raise RuntimeError(f"Twitch JSON malformé : {e}") from e
+        raise RuntimeError(f"Twitch a échoué : {last_err}")
 
     # ------------------------------------------------------------------
     # Recherche
@@ -77,15 +142,9 @@ class TwitchAPI:
             if cursor:
                 params["after"] = cursor
             try:
-                r = requests.get(
-                    f"{self.BASE}/search/channels",
-                    headers=self._headers(),
-                    params=params, timeout=15,
-                )
-                r.raise_for_status()
-                data = r.json()
+                data = self._helix_get("/search/channels", params=params)
             except Exception as e:
-                raise RuntimeError(f"Twitch search a échoué : {e}")
+                raise RuntimeError(f"Twitch search a échoué : {e}") from e
 
             for item in data.get("data", []):
                 results.append({
@@ -118,13 +177,7 @@ class TwitchAPI:
             chunk = logins[i:i + 100]
             params = [("login", lg) for lg in chunk]
             try:
-                r = requests.get(
-                    f"{self.BASE}/users",
-                    headers=self._headers(),
-                    params=params, timeout=15,
-                )
-                r.raise_for_status()
-                data = r.json()
+                data = self._helix_get("/users", params=params)
             except Exception:
                 continue
             for u in data.get("data", []):

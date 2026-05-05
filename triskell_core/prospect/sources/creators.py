@@ -1,7 +1,8 @@
-"""Convertit les résultats bruts YouTube/Twitch/Reddit vers Prospect unifié.
+"""Convertit les résultats bruts des sources créateurs vers Prospect unifié.
 
 Wrapper de haut niveau qui combine :
-- Recherche brute (youtube.YouTubeAPI, twitch.TwitchAPI, reddit.RedditAPI)
+- Recherche brute (YouTube, Twitch, Reddit, Bluesky, Mastodon, Apple Podcasts,
+  Dailymotion, Kick, GitHub)
 - Détection de monétisation (enrichers/monetization.py)
 - Extraction emails/phones depuis la bio
 - Conversion vers le schéma core.prospect.Prospect
@@ -86,6 +87,86 @@ def search_reddit(
         limit = max_results // 2 if kind == "both" else max_results
         raw_list.extend(api.search_users(query, max_results=limit))
     for raw in raw_list:
+        prospect = _from_raw(raw)
+        if not prospect:
+            continue
+        if not include_monetized and prospect.monetized:
+            continue
+        yield prospect
+
+
+def search_bluesky(api, query: str, *, max_results: int = 50,
+                   include_monetized: bool = True) -> Iterable[Prospect]:
+    if not api.available():
+        return
+    for raw in api.search_actors(query, max_results=max_results):
+        prospect = _from_raw(raw)
+        if not prospect:
+            continue
+        if not include_monetized and prospect.monetized:
+            continue
+        yield prospect
+
+
+def search_mastodon(api, query: str, *, max_results: int = 50,
+                    include_monetized: bool = True) -> Iterable[Prospect]:
+    if not api.available():
+        return
+    for raw in api.search_accounts(query, max_results=max_results):
+        prospect = _from_raw(raw)
+        if not prospect:
+            continue
+        if not include_monetized and prospect.monetized:
+            continue
+        yield prospect
+
+
+def search_apple_podcasts(api, query: str, *, max_results: int = 50,
+                          include_monetized: bool = True,
+                          enrich_with_feed: bool = True) -> Iterable[Prospect]:
+    if not api.available():
+        return
+    for raw in api.search_podcasts(query, max_results=max_results,
+                                   enrich_with_feed=enrich_with_feed):
+        prospect = _from_raw(raw)
+        if not prospect:
+            continue
+        if not include_monetized and prospect.monetized:
+            continue
+        yield prospect
+
+
+def search_dailymotion(api, query: str, *, max_results: int = 50,
+                       include_monetized: bool = True) -> Iterable[Prospect]:
+    if not api.available():
+        return
+    for raw in api.search_users(query, max_results=max_results):
+        prospect = _from_raw(raw)
+        if not prospect:
+            continue
+        if not include_monetized and prospect.monetized:
+            continue
+        yield prospect
+
+
+def search_kick(api, query: str, *, max_results: int = 25,
+                include_monetized: bool = True) -> Iterable[Prospect]:
+    if not api.available():
+        return
+    for raw in api.search_channels(query, max_results=max_results):
+        prospect = _from_raw(raw)
+        if not prospect:
+            continue
+        if not include_monetized and prospect.monetized:
+            continue
+        yield prospect
+
+
+def search_github(api, query: str, *, max_results: int = 30,
+                  include_monetized: bool = True) -> Iterable[Prospect]:
+    if not api.available():
+        return
+    for raw in api.search_users(query, max_results=max_results):
         prospect = _from_raw(raw)
         if not prospect:
             continue
