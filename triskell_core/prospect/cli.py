@@ -33,7 +33,10 @@ from .enrichers.footprint import FootprintFinder
 from .enrichers.linktree import LinktreeFollower, is_hub
 from .enrichers.web import WebEnricher
 from .outreach import imap_listener, smtp_sender
-from .sources import denicheur, maps, sirene
+from .sources import creators, denicheur, maps, sirene
+from .sources.reddit import RedditAPI
+from .sources.twitch import TwitchAPI
+from .sources.youtube import YouTubeAPI
 
 
 def cmd_import_denicheur(args) -> int:
@@ -110,6 +113,15 @@ def cmd_config(args) -> int:
     if args.imap_password is not None:
         cfg["imap_password"] = args.imap_password
         changed = True
+    if args.youtube_api_key is not None:
+        cfg["youtube_api_key"] = args.youtube_api_key
+        changed = True
+    if args.twitch_client_id is not None:
+        cfg["twitch_client_id"] = args.twitch_client_id
+        changed = True
+    if args.twitch_client_secret is not None:
+        cfg["twitch_client_secret"] = args.twitch_client_secret
+        changed = True
 
     if changed:
         CONFIG_FILE.write_text(
@@ -128,6 +140,77 @@ def cmd_config(args) -> int:
     if not changed and not args.show:
         print("Rien à faire. Voir --help.")
     return 0
+
+
+def cmd_search_creators(args) -> int:
+    """Recherche créateurs YouTube / Twitch / Reddit (multi-plateformes)."""
+    crm = CRM()
+    cfg = _load_creator_keys()
+
+    found_iters = []
+    if "youtube" in args.platforms:
+        yt_key = cfg.get("youtube_api_key", "")
+        if not yt_key:
+            print("⚠ YouTube API key manquante, plateforme skippée")
+        else:
+            api = YouTubeAPI(yt_key, cfg.get("youtube_api_keys") or [])
+            found_iters.append((
+                "YouTube",
+                creators.search_youtube(
+                    api, args.query, max_results=args.max,
+                    include_monetized=args.include_monetized,
+                ),
+            ))
+    if "twitch" in args.platforms:
+        tw_id = cfg.get("twitch_client_id", "")
+        tw_secret = cfg.get("twitch_client_secret", "")
+        if not (tw_id and tw_secret):
+            print("⚠ Twitch credentials manquants, plateforme skippée")
+        else:
+            api = TwitchAPI(tw_id, tw_secret)
+            found_iters.append((
+                "Twitch",
+                creators.search_twitch(
+                    api, args.query, max_results=args.max,
+                    include_monetized=args.include_monetized,
+                ),
+            ))
+    if "reddit" in args.platforms:
+        api = RedditAPI()
+        found_iters.append((
+            "Reddit",
+            creators.search_reddit(
+                api, args.query, max_results=args.max,
+                kind=args.reddit_kind,
+                include_monetized=args.include_monetized,
+            ),
+        ))
+
+    print(f"Recherche créateurs (q='{args.query}', plateformes={args.platforms})…")
+    total_created = 0
+    total_merged = 0
+    for label, it in found_iters:
+        prospects = list(it)
+        stats = crm.upsert_many(prospects)
+        total_created += stats["created"]
+        total_merged += stats["merged"]
+        print(f"  {label}: {stats['created']} créés, {stats['merged']} fusionnés "
+              f"({len(prospects)} renvoyés)")
+    crm.save()
+    print(f"✓ Total : {total_created} créés, {total_merged} fusionnés. "
+          f"CRM = {len(crm)} prospects.")
+    return 0
+
+
+def _load_creator_keys() -> dict:
+    """Charge les clés YouTube/Twitch depuis CONFIG_FILE."""
+    cfg = {}
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return cfg
 
 
 def cmd_search_sirene(args) -> int:
@@ -508,6 +591,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("import-denicheur",
                    help="Importer ~/.ledenicheur/prospects.json")
 
+    s_creators = sub.add_parser(
+        "search-creators",
+        help="Chercher des créateurs YouTube / Twitch / Reddit",
+    )
+    s_creators.add_argument("--query", required=True,
+                            help="Niche / mot-clé (ex: 'café spécialité')")
+    s_creators.add_argument("--platforms", nargs="+",
+                            default=["youtube", "twitch", "reddit"],
+                            choices=["youtube", "twitch", "reddit"])
+    s_creators.add_argument("--max", type=int, default=50,
+                            help="Max résultats par plateforme")
+    s_creators.add_argument("--include-monetized", action="store_true",
+                            help="Inclure les créateurs déjà monétisés "
+                                 "(par défaut on les exclut)")
+    s_creators.add_argument("--reddit-kind", default="both",
+                            choices=["both", "subreddit", "user"])
+
     s_sirene = sub.add_parser("search-sirene",
                               help="Chercher des entreprises FR via Sirene")
     s_sirene.add_argument("--naf", default="",
@@ -550,6 +650,10 @@ def build_parser() -> argparse.ArgumentParser:
     s_cfg.add_argument("--imap-host", default=None)
     s_cfg.add_argument("--imap-user", default=None)
     s_cfg.add_argument("--imap-password", default=None)
+    # Clés sources créateurs
+    s_cfg.add_argument("--youtube-api-key", default=None)
+    s_cfg.add_argument("--twitch-client-id", default=None)
+    s_cfg.add_argument("--twitch-client-secret", default=None)
 
     s_enrich = sub.add_parser("enrich",
                               help="Visiter les sites web des prospects et compléter")
@@ -613,6 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {
         "import-denicheur": cmd_import_denicheur,
+        "search-creators": cmd_search_creators,
         "search-sirene": cmd_search_sirene,
         "search-maps": cmd_search_maps,
         "enrich": cmd_enrich,
