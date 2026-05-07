@@ -134,3 +134,59 @@ class CRM:
             "merged": merged,
             "total": len(self._prospects),
         }
+
+
+# ---------------------------------------------------------------------------
+# Factory : choisit le backend (Supabase si dispo, sinon JSON local)
+# ---------------------------------------------------------------------------
+def get_crm(*, force_local: bool = False, force_remote: bool = False):
+    """Renvoie un CRM utilisable, peu importe que Supabase soit configuré.
+
+    - Si `force_local=True` : toujours JSON local.
+    - Si `force_remote=True` : toujours Supabase (lève si pas configuré).
+    - Sinon : tente Supabase en priorité, fallback JSON local si :
+        * supabase non configuré (URL/clé absentes)
+        * supabase non authentifié (token absent / expiré)
+        * SDK supabase-py non installé
+
+    Le code consommateur peut traiter le résultat comme un CRM uniforme
+    (les deux exposent : all(), find(), upsert(), upsert_many(), save(),
+    __len__).
+    """
+    if force_local and force_remote:
+        raise ValueError("force_local et force_remote sont exclusifs.")
+
+    if not force_local:
+        try:
+            # Imports lazy : pas de pénalité si Supabase pas installé
+            from ...db.client import get_client, SupabaseNotConfigured
+            from ...db.remote_crm import RemoteCRM
+
+            try:
+                client = get_client()
+            except SupabaseNotConfigured:
+                if force_remote:
+                    raise
+                return CRM()
+
+            if not client.is_authenticated and force_remote:
+                raise RuntimeError(
+                    "Supabase configuré mais pas authentifié. "
+                    "Login requis avant get_crm(force_remote=True)."
+                )
+            if client.is_authenticated:
+                return RemoteCRM(client=client)
+            if force_remote:
+                raise RuntimeError("Login Supabase requis.")
+        except ImportError:
+            if force_remote:
+                raise
+            # Pas de SDK → fallback local
+            pass
+        except Exception:
+            if force_remote:
+                raise
+            # Toute autre erreur réseau → fallback local
+            pass
+
+    return CRM()

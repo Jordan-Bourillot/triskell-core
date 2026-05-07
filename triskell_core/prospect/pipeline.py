@@ -64,6 +64,16 @@ class PipelineConfig:
     maps_radius_m: int = 50000
     search_max_results: int = 50
 
+    # Obelisk (créateurs/vendeurs réseaux, déjà déposés dans la base partagée)
+    obelisk_platform: str = ""             # "" = toutes ; ex "youtube", "tiktok"…
+    obelisk_min_subscribers: int = 0       # 0 = pas de plancher
+    obelisk_max_subscribers: int = 0       # 0 = pas de plafond
+    obelisk_country: str = ""              # "" = tout, ex "FR"
+    obelisk_language: str = ""             # "" = tout, ex "fr"
+    obelisk_only_with_email: bool = False  # exclut ceux sans email connu
+    obelisk_only_uncontacted: bool = True  # exclut déjà contactés
+    obelisk_monetized_only: bool = False   # uniquement profils monétisés
+
     # Enrichissement
     enrich_with_footprint: bool = True
     enrich_no_emails_only: bool = True
@@ -269,6 +279,23 @@ def _search_iterator(cfg: PipelineConfig):
             location_bias_lat=cfg.maps_lat,
             location_bias_lng=cfg.maps_lng,
             radius_m=cfg.maps_radius_m,
+            max_results=cfg.search_max_results,
+        )
+    if cfg.source == "obelisk":
+        from .sources import obelisk
+        if not obelisk.is_available():
+            raise RuntimeError(
+                "Base partagée Triskell non joignable (connexion requise)"
+            )
+        return obelisk.search(
+            platform=cfg.obelisk_platform,
+            min_subscribers=cfg.obelisk_min_subscribers or None,
+            max_subscribers=cfg.obelisk_max_subscribers or None,
+            country=cfg.obelisk_country,
+            language=cfg.obelisk_language,
+            only_with_email=cfg.obelisk_only_with_email,
+            only_uncontacted=cfg.obelisk_only_uncontacted,
+            monetized_only=cfg.obelisk_monetized_only,
             max_results=cfg.search_max_results,
         )
     return iter([])
