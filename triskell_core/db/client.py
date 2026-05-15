@@ -222,6 +222,39 @@ class SupabaseClient:
             logger.debug("Restore session failed : %s", exc)
             return False
 
+    def refresh_session(self) -> bool:
+        """Rafraîchit l'access_token via le refresh_token avant expiration.
+
+        À appeler périodiquement (ex. toutes les 30 min) par le serveur HTTP
+        pour que l'utilisateur n'ait JAMAIS à se reconnecter manuellement.
+
+        Renvoie True si le refresh a réussi, False sinon.
+        Sauvegarde automatiquement les nouveaux tokens dans auth.json.
+        """
+        if not self._refresh_token:
+            return False
+        sb = self._ensure_sdk()
+        try:
+            res = sb.auth.refresh_session(self._refresh_token)
+            session = getattr(res, "session", None)
+            if session is None:
+                return False
+            new_access = getattr(session, "access_token", None)
+            new_refresh = getattr(session, "refresh_token", None) or self._refresh_token
+            if not new_access:
+                return False
+            self._access_token = new_access
+            self._refresh_token = new_refresh
+            try:
+                sb.auth.set_session(new_access, new_refresh)
+            except Exception:
+                pass
+            self._save_auth()
+            return True
+        except Exception as exc:
+            logger.warning("refresh_session a échoué : %s", exc)
+            return False
+
     def _save_auth(self) -> None:
         try:
             TRISKELL_COMMAND_DIR.mkdir(parents=True, exist_ok=True)
