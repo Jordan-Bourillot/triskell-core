@@ -45,20 +45,36 @@ MAX_BYTES = 1_500_000  # 1.5 MB
 CACHE_TTL = timedelta(days=7)
 MIN_INTERVAL_PER_DOMAIN = 1.0  # s
 
-# Pages prioritaires à explorer si trouvées
+# Pages prioritaires à explorer si trouvées — élargie pour maximiser
+# les chances de trouver un email (créateurs / coachs / agences).
 PRIORITY_PATHS = [
-    # FR
+    # FR — mentions légales / contact / à propos
     "/mentions-legales", "/mentions-legales/", "/legal", "/legal/",
     "/contact", "/contact/", "/contactez-nous", "/nous-contacter",
     "/about", "/about/", "/a-propos", "/a-propos/", "/qui-sommes-nous",
+    # FR — pages spécifiques créateurs / agences
+    "/booking", "/reservation", "/devis", "/tarifs", "/prix",
+    "/partenariat", "/partenariats", "/partner", "/partners",
+    "/collab", "/collaboration", "/collaborer",
+    "/business", "/pro", "/professionnel",
+    "/equipe", "/team", "/notre-equipe",
+    "/presse", "/media", "/medias",
+    "/agence", "/agency",
     # EN
-    "/imprint", "/legal-notice",
+    "/imprint", "/legal-notice", "/get-in-touch", "/work-with-us",
+    "/hire-me", "/hire-us", "/services",
 ]
 PRIORITY_KEYWORDS_IN_LINK = [
     "mentions légales", "mentions legales", "mentions",
-    "contact", "contactez",
+    "contact", "contactez", "nous écrire", "écrire",
     "à propos", "a propos", "about",
     "imprint", "legal",
+    "booking", "réserver", "réservation", "devis",
+    "partenariat", "partenariats", "partner", "collab",
+    "business", "pro", "travailler avec",
+    "équipe", "team", "presse", "media",
+    "tarifs", "prix", "services",
+    "hire", "work with",
 ]
 
 
@@ -276,7 +292,7 @@ def _internal_priority_links(html: str, base_url: str) -> list[str]:
         if match:
             found.append(full)
             seen_paths.add(path)
-        if len(found) >= 3:
+        if len(found) >= 5:
             break
     return found
 
@@ -355,7 +371,7 @@ class WebEnricher:
         self._robots = RobotsCache()
         self._session = requests.Session()
 
-    def enrich_url(self, url: str, max_pages: int = 3) -> dict:
+    def enrich_url(self, url: str, max_pages: int = 6) -> dict:
         """Visite `url` + jusqu'à (max_pages-1) pages prio. Renvoie agrégat."""
         if not url:
             return _empty_result()

@@ -154,6 +154,38 @@ def _prospect_key(p: dict) -> str:
     return f"{p.get('platform', '')}|{p.get('id', '')}"
 
 
+def _infer_standard_emails(url: str) -> list[str]:
+    """Génère une liste d'emails standards plausibles depuis un domaine.
+
+    Quand le crawl web n'a rien trouvé, on essaye « contact@domain.com »
+    et autres patterns courants. Ces emails sont marqués comme inférés
+    (`emails_inferred = True`) — à valider à la main avant envoi en masse.
+    """
+    from urllib.parse import urlparse
+    try:
+        host = urlparse(url if url.startswith("http") else "https://" + url).netloc
+    except Exception:
+        return []
+    host = host.lower().lstrip("www.")
+    if not host or "." not in host:
+        return []
+    # On exclut les hébergeurs / réseaux où contact@ n'aurait pas de sens
+    blacklist_hosts = (
+        "github.io", "wordpress.com", "blogspot.com", "wixsite.com",
+        "weebly.com", "linktr.ee", "beacons.ai", "lnk.bio",
+    )
+    if any(host.endswith(b) for b in blacklist_hosts):
+        return []
+    candidates = [
+        f"contact@{host}",
+        f"hello@{host}",
+        f"booking@{host}",
+        f"partenariats@{host}",
+        f"collab@{host}",
+    ]
+    return candidates[:3]  # max 3 pour ne pas spammer 5 adresses non-validées
+
+
 # ---------------------------------------------------------------------------
 # Pipeline runner
 # ---------------------------------------------------------------------------
@@ -320,6 +352,7 @@ def run_creators_pipeline(
         web = WebEnricher()
         linktree = LinktreeFollower(web_enricher=web)
         n_enriched = 0
+        n_inferred = 0
         for p in existing:
             if p.get("emails"):
                 continue
@@ -335,6 +368,15 @@ def run_creators_pipeline(
                 if data.get("emails"):
                     p["emails"] = list(data["emails"])[:5]
                     n_enriched += 1
+                else:
+                    # Pas d'email trouvé par crawl → on génère des candidats
+                    # standards basés sur le domaine du site. Marqués comme
+                    # "inférés" pour distinction.
+                    inferred = _infer_standard_emails(url)
+                    if inferred:
+                        p["emails"] = inferred
+                        p["emails_inferred"] = True
+                        n_inferred += 1
                 if data.get("phones"):
                     p["phones"] = list(data["phones"])[:3]
                 p["web_enriched_at"] = datetime.now().isoformat(timespec="seconds")
@@ -343,7 +385,9 @@ def run_creators_pipeline(
                 logger.debug("enrich %s : %s", p.get("name", ""), e)
         _save_denicheur_prospects(existing)
         stats["enriched"] = n_enriched
-        log(f"  → {n_enriched} prospect(s) avec email récupéré")
+        stats["inferred_emails"] = n_inferred
+        log(f"  → {n_enriched} prospect(s) avec email récupéré "
+            f"(+ {n_inferred} avec email inféré standard)")
 
     # ---- Étape 3 : Génération IA + envoi/draft ----
     log(f"Étape 3/4 — IA + envoi (mode {cfg.mode})…")
