@@ -143,6 +143,13 @@ class RemoteCRM:
     def __iter__(self):
         return iter(self.all())
 
+    def _ws_id(self) -> Optional[str]:
+        """Recupere workspace_id pour injection sur les inserts (migration 20)."""
+        try:
+            return self._client._current_workspace_id()
+        except Exception:
+            return None
+
     def upsert(self, prospect: Prospect) -> tuple[Prospect, bool]:
         """Insère ou fusionne. Renvoie (prospect_final, was_new_bool).
 
@@ -150,6 +157,7 @@ class RemoteCRM:
         """
         existing = self.find(prospect)
         sb = self._client.raw
+        ws_id = self._ws_id()
         if existing is not None:
             existing.merge(prospect)
             row = prospect_to_row(existing)
@@ -166,6 +174,8 @@ class RemoteCRM:
             else:
                 # Cas dégradé : insère
                 row["created_by"] = self._client.user_id
+                if ws_id:
+                    row["workspace_id"] = ws_id
                 res = sb.table("prospects").insert(row).execute()
                 if res.data:
                     new_id = res.data[0].get("id")
@@ -180,6 +190,8 @@ class RemoteCRM:
         row = prospect_to_row(prospect)
         row["created_by"] = self._client.user_id
         row["updated_by"] = self._client.user_id
+        if ws_id:
+            row["workspace_id"] = ws_id
         res = sb.table("prospects").insert(row).execute()
         if res.data:
             new_id = res.data[0].get("id")
