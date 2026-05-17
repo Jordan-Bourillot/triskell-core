@@ -296,13 +296,38 @@ class SupabaseClient:
             logger.debug("get_shared_setting %s : %s", key, exc)
         return default
 
+    def _current_workspace_id(self) -> str | None:
+        """Renvoie l'uuid du workspace courant (multi-tenant depuis migration 20).
+
+        Utilise la fonction SQL public.current_workspace_id() qui lit auth.uid().
+        Cache le résultat pour éviter une RPC par appel.
+        """
+        cached = getattr(self, "_ws_id_cache", None)
+        if cached:
+            return cached
+        try:
+            res = self.raw.rpc("current_workspace_id").execute()
+            ws_id = res.data if isinstance(res.data, str) else None
+            self._ws_id_cache = ws_id
+            return ws_id
+        except Exception as exc:
+            logger.debug("current_workspace_id RPC: %s", exc)
+            return None
+
     def set_shared_setting(self, key: str, value: Any) -> None:
         try:
-            self.table("shared_settings").upsert({
+            row = {
                 "key": key,
                 "value": value,
                 "updated_by": self._user_id,
-            }).execute()
+            }
+            # Depuis la migration 20 (multi-tenant), shared_settings a une
+            # colonne workspace_id NOT NULL et PK (workspace_id, key). Sans
+            # ce champ, l'upsert plante silencieusement (warning seulement).
+            ws_id = self._current_workspace_id()
+            if ws_id:
+                row["workspace_id"] = ws_id
+            self.table("shared_settings").upsert(row).execute()
         except Exception as exc:
             logger.warning("set_shared_setting %s a échoué : %s", key, exc)
 
