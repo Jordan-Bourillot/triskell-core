@@ -78,6 +78,9 @@ def search(
     language: str = "fr",
     region: str = "FR",
     max_results: int = 60,
+    lat_offset_m: float = 0.0,
+    lng_offset_m: float = 0.0,
+    cursor_out: dict | None = None,
 ) -> Iterator[Prospect]:
     """
     Recherche Places par requête textuelle.
@@ -87,6 +90,10 @@ def search(
         search(text_query="restaurant", location_bias_lat=48.117, location_bias_lng=-1.677, radius_m=10000)
 
     Note : Places API New limite à 60 résultats max par requête (paginés en 3 pages).
+
+    lat_offset_m / lng_offset_m : décalent le centre de la zone de recherche
+    pour permettre au pipeline de balayer une grille géographique entre les
+    runs successifs (sinon on retombe toujours sur le même top de zone).
     """
     api_key = _load_api_key()
     if not api_key:
@@ -97,16 +104,29 @@ def search(
         )
         return
 
+    # Application des offsets (conversion mètres → degrés)
+    lat = location_bias_lat
+    lng = location_bias_lng
+    if lat is not None and lng is not None and (lat_offset_m or lng_offset_m):
+        import math
+        # 1 degré latitude ≈ 111 320 m
+        dlat = lat_offset_m / 111_320.0
+        # 1 degré longitude ≈ 111 320 m × cos(lat)
+        cos_lat = max(0.01, math.cos(math.radians(lat)))
+        dlng = lng_offset_m / (111_320.0 * cos_lat)
+        lat = lat + dlat
+        lng = lng + dlng
+
     payload: dict = {
         "textQuery": text_query,
         "languageCode": language,
         "regionCode": region,
         "pageSize": min(20, max_results),
     }
-    if location_bias_lat is not None and location_bias_lng is not None:
+    if lat is not None and lng is not None:
         payload["locationBias"] = {
             "circle": {
-                "center": {"latitude": location_bias_lat, "longitude": location_bias_lng},
+                "center": {"latitude": lat, "longitude": lng},
                 "radius": float(radius_m),
             }
         }
@@ -137,10 +157,16 @@ def search(
 
         places = data.get("places", []) or []
         if not places:
+            if cursor_out is not None:
+                cursor_out["cell_exhausted"] = True
+                cursor_out["yielded"] = fetched
             return
 
         for item in places:
             if fetched >= max_results:
+                if cursor_out is not None:
+                    cursor_out["cell_exhausted"] = False
+                    cursor_out["yielded"] = fetched
                 return
             try:
                 prospect = _convert(item)
@@ -154,10 +180,17 @@ def search(
 
         next_token = data.get("nextPageToken")
         if not next_token:
+            if cursor_out is not None:
+                cursor_out["cell_exhausted"] = True
+                cursor_out["yielded"] = fetched
             return
         # Le pageToken doit être propagé tel quel ; on retire le textQuery
         # (l'API exige uniquement pageToken pour la suite).
         payload = {"pageToken": next_token}
+
+    if cursor_out is not None:
+        cursor_out["cell_exhausted"] = False
+        cursor_out["yielded"] = fetched
 
 
 def _convert(item: dict) -> Prospect | None:

@@ -49,6 +49,8 @@ def search(
     etat: str = "A",                # A = actif uniquement
     per_page: int = 25,
     max_results: int = 200,
+    start_page: int = 1,
+    cursor_out: dict | None = None,
 ) -> Iterator[Prospect]:
     """
     Itère les entreprises matchant les critères, converties au format unifié.
@@ -88,9 +90,18 @@ def search(
 
     fetched = 0
     last = 0.0
+    start = max(1, int(start_page or 1))
+    last_completed = start - 1
 
-    for page in range(1, MAX_PAGES + 1):
+    for page in range(start, MAX_PAGES + 1):
         if fetched >= max_results:
+            if cursor_out is not None:
+                # On a stoppé par quota — la page courante n'est pas terminée
+                # mais on avance quand même au prochain numéro pour éviter de
+                # re-balayer les mêmes premiers résultats au run suivant.
+                cursor_out["last_completed_page"] = last_completed
+                cursor_out["next_page"] = last_completed + 1
+                cursor_out["exhausted"] = False
             return
         delta = time.time() - last
         if delta < MIN_INTERVAL:
@@ -108,14 +119,29 @@ def search(
             data = r.json()
         except Exception as e:
             log.warning("Sirene page %d a échoué : %s", page, e)
+            if cursor_out is not None:
+                cursor_out["last_completed_page"] = last_completed
+                cursor_out["next_page"] = last_completed + 1
+                cursor_out["exhausted"] = False
             return
 
         results = data.get("results", []) or []
         if not results:
+            if cursor_out is not None:
+                cursor_out["last_completed_page"] = page
+                cursor_out["next_page"] = 1
+                cursor_out["exhausted"] = True
             return
 
         for item in results:
             if fetched >= max_results:
+                if cursor_out is not None:
+                    # On a entamé la page courante avant d'atteindre le quota.
+                    # On considère cette page « consommée » pour ne pas
+                    # retomber sur les mêmes premiers résultats au run d'après.
+                    cursor_out["last_completed_page"] = page
+                    cursor_out["next_page"] = page + 1
+                    cursor_out["exhausted"] = False
                 return
             try:
                 prospect = _convert(item)
@@ -127,10 +153,20 @@ def search(
             fetched += 1
             yield prospect
 
+        last_completed = page
         # Pagination par défaut de l'API
         total_pages = data.get("total_pages", 1) or 1
         if page >= total_pages:
+            if cursor_out is not None:
+                cursor_out["last_completed_page"] = page
+                cursor_out["next_page"] = 1
+                cursor_out["exhausted"] = True
             return
+
+    if cursor_out is not None:
+        cursor_out["last_completed_page"] = last_completed
+        cursor_out["next_page"] = last_completed + 1
+        cursor_out["exhausted"] = last_completed >= MAX_PAGES
 
 
 def _convert(item: dict) -> Prospect | None:

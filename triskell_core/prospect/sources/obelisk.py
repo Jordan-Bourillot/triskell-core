@@ -51,6 +51,9 @@ def search(
     only_uncontacted: bool = True,
     monetized_only: bool = False,
     max_results: int = 50,
+    offset: int = 0,
+    shuffle_seed: int | None = None,
+    cursor_out: dict | None = None,
 ) -> Iterator[Prospect]:
     """Itère les prospects Obelisk déposés en base, filtrés.
 
@@ -85,20 +88,14 @@ def search(
     # États considérés comme "encore contactables"
     UNCONTACTED_STATUSES = {"new", "qualified", ""}
 
-    yielded = 0
+    # Filtre d'abord, puis applique offset + shuffle pour ne pas retomber
+    # sur les mêmes prospects en tête de liste à chaque run.
+    candidates = []
     for p in all_prospects:
-        if yielded >= max_results:
-            break
-
-        # 1) Doit avoir Obelisk comme source
         if not _is_obelisk(p):
             continue
-
-        # 2) Filtre plateforme (Obelisk stocke la plateforme dans `industry`)
         if pf and (p.industry or "").lower() != pf:
             continue
-
-        # 3) Filtre abonnés
         subs = p.subscribers
         if min_subscribers is not None:
             if subs is None or subs < min_subscribers:
@@ -106,28 +103,44 @@ def search(
         if max_subscribers is not None:
             if subs is None or subs > max_subscribers:
                 continue
-
-        # 4) Filtres pays / langue
         if co and (p.country or "").lower() != co:
             continue
         if la and (p.language or "").lower() != la:
             continue
-
-        # 5) Email présent ?
         if only_with_email and not (p.emails or []):
             continue
-
-        # 6) Pas déjà contacté ?
         if only_uncontacted:
             if (p.status or "").lower() not in UNCONTACTED_STATUSES:
                 continue
-
-        # 7) Monétisé uniquement ?
         if monetized_only and not p.monetized:
             continue
+        candidates.append(p)
 
+    total = len(candidates)
+
+    if shuffle_seed is not None:
+        import random
+        random.Random(shuffle_seed).shuffle(candidates)
+
+    start = max(0, int(offset or 0))
+    if start >= total:
+        # On a déjà tout balayé : on recommence depuis le début pour ne
+        # pas renvoyer 0 résultat (l'anti-doublon CRM fera le tri ensuite).
+        start = 0
+
+    yielded = 0
+    consumed = 0
+    for p in candidates[start:]:
+        if yielded >= max_results:
+            break
         yielded += 1
+        consumed += 1
         yield p
+
+    if cursor_out is not None:
+        cursor_out["next_offset"] = start + consumed
+        cursor_out["total"] = total
+        cursor_out["exhausted"] = (start + consumed) >= total
 
 
 def _is_obelisk(prospect: Prospect) -> bool:

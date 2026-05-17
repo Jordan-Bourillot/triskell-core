@@ -192,12 +192,16 @@ def run_full_pipeline(
         log(f"Étape 1/4 — Recherche {cfg.source}…")
         try:
             crm = CRM()
-            iterator = _search_iterator(cfg)
+            iterator, finalize = _search_iterator(cfg, log=log)
             before = len(crm)
             r = crm.upsert_many(iterator)
             crm.save()
             stats.searched = r.get("created", 0)
             log(f"  → {stats.searched} nouveau(x) prospect(s) ({r.get('merged', 0)} fusionnés)")
+            try:
+                finalize()
+            except Exception as e:
+                logger.debug("search cursor finalize: %s", e)
         except Exception as e:
             stats.errors.append(f"search: {e}")
             log(f"  ⚠ {e}")
@@ -258,36 +262,150 @@ def run_full_pipeline(
 # ---------------------------------------------------------------------------
 # Helpers internes
 # ---------------------------------------------------------------------------
-def _search_iterator(cfg: PipelineConfig):
+def _search_iterator(cfg: PipelineConfig, *, log: Callable[[str], None] | None = None):
+    """Renvoie (iterator, finalize_callback).
+
+    Le finalize_callback doit être appelé APRÈS la consommation totale de
+    l'iterator : il persiste l'avancée du curseur pour le prochain run.
+
+    Cette indirection permet à chaque source d'avancer entre runs au lieu
+    de retomber sur les mêmes pages / mêmes coordonnées / mêmes prospects.
+    """
+    from . import search_cursor
+    _log = log or (lambda _msg: None)
+
     if cfg.source == "sirene":
         from .sources import sirene
-        return sirene.search(
-            activite_principale=cfg.sirene_naf,
-            departement=cfg.sirene_departement,
+        naf_codes = search_cursor.split_list(cfg.sirene_naf) or [""]
+        depts = search_cursor.split_list(cfg.sirene_departement) or [""]
+        criteria = {
+            "source": "sirene",
+            "naf_codes": naf_codes,
+            "depts": depts,
+            "code_postal": cfg.sirene_code_postal,
+            "query": cfg.sirene_query,
+            "effectif": cfg.sirene_effectif,
+            "min_date_creation": cfg.sirene_min_date_creation,
+        }
+        state = search_cursor.load("sirene", criteria)
+        naf_idx = int(state.get("naf_index") or 0) % len(naf_codes)
+        dept_idx = int(state.get("dept_index") or 0) % len(depts)
+        start_page = int(state.get("next_page") or 1)
+        cur_naf = naf_codes[naf_idx]
+        cur_dept = depts[dept_idx]
+        _log(f"  curseur sirène : NAF={cur_naf or '*'} dept={cur_dept or '*'} page={start_page}")
+        cursor_out: dict = {}
+
+        iterator = sirene.search(
+            activite_principale=cur_naf,
+            departement=cur_dept,
             code_postal=cfg.sirene_code_postal,
             nom_entreprise=cfg.sirene_query,
             min_date_creation=cfg.sirene_min_date_creation,
             tranche_effectif=cfg.sirene_effectif,
             max_results=cfg.search_max_results,
+            start_page=start_page,
+            cursor_out=cursor_out,
         )
+
+        def finalize_sirene():
+            new_state = dict(state)
+            if cursor_out.get("exhausted"):
+                # On a fini ce (NAF, dept) → on avance dans la rotation
+                next_dept_idx = (dept_idx + 1) % len(depts)
+                if next_dept_idx == 0:
+                    next_naf_idx = (naf_idx + 1) % len(naf_codes)
+                else:
+                    next_naf_idx = naf_idx
+                new_state["naf_index"] = next_naf_idx
+                new_state["dept_index"] = next_dept_idx
+                new_state["next_page"] = 1
+            else:
+                new_state["naf_index"] = naf_idx
+                new_state["dept_index"] = dept_idx
+                new_state["next_page"] = cursor_out.get("next_page", start_page + 1)
+            search_cursor.save("sirene", criteria, new_state)
+
+        return iterator, finalize_sirene
+
     if cfg.source == "maps":
         from .sources import maps
         if not maps.is_configured():
             raise RuntimeError("Clé Google Places non configurée")
-        return maps.search(
+        criteria = {
+            "source": "maps",
+            "query": cfg.maps_query,
+            "lat": cfg.maps_lat,
+            "lng": cfg.maps_lng,
+            "radius_m": cfg.maps_radius_m,
+        }
+        state = search_cursor.load("maps", criteria)
+        # Pas de coord → pas de rotation possible
+        if cfg.maps_lat is None or cfg.maps_lng is None:
+            iterator = maps.search(
+                text_query=cfg.maps_query,
+                radius_m=cfg.maps_radius_m,
+                max_results=cfg.search_max_results,
+            )
+            return iterator, (lambda: None)
+
+        # Grille : cellules de taille = radius (zones tangentes)
+        step_m = max(1000, int(cfg.maps_radius_m))
+        cells = search_cursor.spiral_offsets(step_m=step_m, max_cells=49)
+        cell_idx = int(state.get("cell_index") or 0) % len(cells)
+        dx, dy = cells[cell_idx]
+        _log(f"  curseur maps : cellule {cell_idx}/{len(cells) - 1} (offset {dx}m, {dy}m)")
+        cursor_out = {}
+
+        iterator = maps.search(
             text_query=cfg.maps_query,
             location_bias_lat=cfg.maps_lat,
             location_bias_lng=cfg.maps_lng,
             radius_m=cfg.maps_radius_m,
             max_results=cfg.search_max_results,
+            lat_offset_m=float(dy),
+            lng_offset_m=float(dx),
+            cursor_out=cursor_out,
         )
+
+        def finalize_maps():
+            new_state = dict(state)
+            # On avance toujours d'une cellule, qu'elle soit épuisée ou
+            # pleine — pour explorer la grille. La même cellule sera
+            # re-visitée plus tard au prochain tour.
+            new_state["cell_index"] = (cell_idx + 1) % len(cells)
+            search_cursor.save("maps", criteria, new_state)
+
+        return iterator, finalize_maps
+
     if cfg.source == "obelisk":
         from .sources import obelisk
         if not obelisk.is_available():
             raise RuntimeError(
                 "Base partagée Triskell non joignable (connexion requise)"
             )
-        return obelisk.search(
+        criteria = {
+            "source": "obelisk",
+            "platform": cfg.obelisk_platform,
+            "min_subs": cfg.obelisk_min_subscribers,
+            "max_subs": cfg.obelisk_max_subscribers,
+            "country": cfg.obelisk_country,
+            "language": cfg.obelisk_language,
+            "with_email": cfg.obelisk_only_with_email,
+            "uncontacted": cfg.obelisk_only_uncontacted,
+            "monetized": cfg.obelisk_monetized_only,
+        }
+        state = search_cursor.load("obelisk", criteria)
+        offset = int(state.get("next_offset") or 0)
+        seed = int(state.get("shuffle_seed") or 0) or None
+        if seed is None:
+            # Première fois : on génère une seed stable pour ce jeu de critères
+            import hashlib as _h
+            seed = int(_h.sha1(str(criteria).encode()).hexdigest()[:8], 16)
+        _log(f"  curseur obelisk : offset={offset} (seed={seed})")
+        cursor_out = {}
+
+        iterator = obelisk.search(
             platform=cfg.obelisk_platform,
             min_subscribers=cfg.obelisk_min_subscribers or None,
             max_subscribers=cfg.obelisk_max_subscribers or None,
@@ -297,8 +415,25 @@ def _search_iterator(cfg: PipelineConfig):
             only_uncontacted=cfg.obelisk_only_uncontacted,
             monetized_only=cfg.obelisk_monetized_only,
             max_results=cfg.search_max_results,
+            offset=offset,
+            shuffle_seed=seed,
+            cursor_out=cursor_out,
         )
-    return iter([])
+
+        def finalize_obelisk():
+            new_state = dict(state)
+            if cursor_out.get("exhausted"):
+                # Tour complet : on garde la seed (ordre stable) mais on
+                # repart au début. L'anti-doublon CRM saute les déjà-contactés.
+                new_state["next_offset"] = 0
+            else:
+                new_state["next_offset"] = cursor_out.get("next_offset", offset)
+            new_state["shuffle_seed"] = seed
+            search_cursor.save("obelisk", criteria, new_state)
+
+        return iterator, finalize_obelisk
+
+    return iter([]), (lambda: None)
 
 
 def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[int, int]:
