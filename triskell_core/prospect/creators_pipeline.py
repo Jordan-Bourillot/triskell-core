@@ -219,6 +219,25 @@ def run_creators_pipeline(
                 api = YouTubeAPI(yt_key, denicheur_cfg.get("youtube_api_keys") or [])
                 ids = api.search_channels(cfg.niche, max_results=cfg.max_per_platform)
                 raw_list = api.get_channels_details(ids)
+                # ⚡ Scrape la page /about de chaque chaîne pour récupérer
+                # les liens externes (Instagram/TikTok/site perso) et
+                # l'email contact, que l'API Data v3 ne renvoie PAS.
+                # On limite à 30 chaînes pour ne pas exploser le temps total.
+                scrape_limit = min(30, len(raw_list))
+                if scrape_limit > 0:
+                    log(f"  YouTube : scrape /about de {scrape_limit} chaînes…")
+                for raw in raw_list[:scrape_limit]:
+                    try:
+                        about = api.scrape_about_page(
+                            channel_id=raw.get("id"),
+                            handle=raw.get("handle") or "",
+                        )
+                        if about.get("emails"):
+                            raw["emails"] = about["emails"]
+                        if about.get("external_links"):
+                            raw["urls_in_bio"] = about["external_links"]
+                    except Exception:
+                        continue
                 for raw in raw_list:
                     if cfg.only_unmonetized:
                         from .enrichers.monetization import detect_monetization
