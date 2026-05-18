@@ -98,10 +98,16 @@ def send_email(
     to: str,
     subject: str,
     body: str,
+    body_html: str = "",
     reply_to: str = "",
     custom_headers: dict | None = None,
 ) -> str:
-    """Envoie 1 mail. Renvoie le Message-ID. Lève en cas d'échec."""
+    """Envoie 1 mail. Renvoie le Message-ID. Lève en cas d'échec.
+
+    Si `body_html` est fourni, on envoie en multipart/alternative :
+    le client mail affiche le HTML, mais peut retomber sur le texte
+    si le HTML ne s'affiche pas (vieux clients, lecteurs vocaux, etc.).
+    """
     msg = EmailMessage()
     from_name = smtp_cfg.get("from_name", "")
     from_email = smtp_cfg["from_email"]
@@ -120,6 +126,8 @@ def send_email(
         for k, v in custom_headers.items():
             msg[k] = v
     msg.set_content(body)
+    if body_html and body_html.strip():
+        msg.add_alternative(body_html, subtype="html")
 
     host = smtp_cfg["smtp_host"]
     port = int(smtp_cfg["smtp_port"])
