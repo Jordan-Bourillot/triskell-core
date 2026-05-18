@@ -469,15 +469,26 @@ def run_creators_pipeline(
             "plutôt que d'inventer un autre nom.",
         ]
     elif cfg.catalog.strip():
-        # Mode catalogue : on laisse l'IA choisir
+        # Mode catalogue : on laisse l'IA choisir, avec une stratégie de
+        # match prioritaire sur les templates métier (« Site Template
+        # Électricien », etc.) si applicable.
         catalog_block_lines = [
             "MON CATALOGUE D'OFFRES (l'expéditeur Jordan vend ces produits/services) :",
             cfg.catalog.strip(),
             "",
-            "INSTRUCTION : choisis dans CE catalogue l'offre la plus pertinente pour ce "
-            "prospect (selon sa niche, sa description, son audience). Pitche-la "
-            "explicitement avec son nom exact tel qu'il apparaît ci-dessus. N'invente "
-            "JAMAIS un produit qui ne serait pas dans ce catalogue.",
+            "INSTRUCTIONS DE CHOIX D'OFFRE :",
+            "1. Regarde si le catalogue contient un TEMPLATE MÉTIER qui correspond "
+            "exactement au métier/secteur du prospect (ex: prospect = électricien → "
+            "« Site Template Électricien »). Si oui, pitche-le précisément.",
+            "2. Sinon, cherche un produit du catalogue qui peut RAISONNABLEMENT "
+            "convenir à ce prospect (par audience, secteur, taille). Adapte ton "
+            "pitch pour expliquer pourquoi ce produit est pertinent pour LUI.",
+            "3. Si VRAIMENT rien dans le catalogue ne colle, propose un produit "
+            "générique du catalogue (le plus large) en restant subtil — pas de "
+            "vente forcée.",
+            "",
+            "Tu pitches TOUJOURS un produit avec son nom EXACT tel qu'il apparaît "
+            "dans le catalogue. N'invente JAMAIS un produit absent du catalogue.",
         ]
     # else : pas de catalogue → comportement historique (l'IA peut inventer)
 
