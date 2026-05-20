@@ -36,6 +36,21 @@ _EMAIL_BLACKLIST = (
 )
 
 
+def _dedupe_collapsed_emails(emails: list[str]) -> list[str]:
+    """Nettoie les emails dont le suffixe a été collé à un autre mot.
+
+    Ex : ['business@mkbhd.com', 'business@mkbhd.comnyc'] → ['business@mkbhd.com']
+    On parcourt du plus court au plus long ; si un email A est strictement
+    préfixe de B, on garde A et on jette B.
+    """
+    out: list[str] = []
+    for e in sorted(set(emails), key=len):
+        if any(e != short and e.startswith(short) for short in out):
+            continue
+        out.append(e)
+    return out
+
+
 class YouTubeAPI:
     """Client YouTube Data API v3 avec rotation de clés."""
 
@@ -180,31 +195,53 @@ class YouTubeAPI:
         """
         if not channel_id and not handle:
             return {"emails": [], "external_links": []}
-        # Privilégie l'URL @handle si dispo (plus stable), sinon /channel/id
+        # On essaye dans l'ordre : @handle/about, puis /channel/id/about
+        # en fallback si le handle est invalide ou inconnu (404).
+        urls_to_try: list[str] = []
         if handle:
             handle_clean = handle.lstrip("@")
-            url = f"https://www.youtube.com/@{handle_clean}/about"
-        else:
-            url = f"https://www.youtube.com/channel/{channel_id}/about"
-        try:
-            r = requests.get(
-                url,
-                headers={
-                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    "Chrome/120.0 Safari/537.36"),
-                    "Accept-Language": "fr,en;q=0.9",
-                },
-                timeout=15,
-            )
-            r.raise_for_status()
-            html = r.text
-        except Exception:
+            urls_to_try.append(f"https://www.youtube.com/@{handle_clean}/about")
+        if channel_id:
+            urls_to_try.append(f"https://www.youtube.com/channel/{channel_id}/about")
+
+        headers = {
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0 Safari/537.36"),
+            "Accept-Language": "fr,en;q=0.9",
+            # Cookie de consentement RGPD : sans lui, YouTube redirige
+            # toutes les requêtes anonymes EU vers consent.youtube.com
+            # et on récupère une page vide. Cookie "accept all".
+            "Cookie": ("SOCS=CAESEwgDEgk0NzU2NjY0MjUaAmZyIAEaBgiAirOyBg; "
+                       "CONSENT=YES+cb"),
+        }
+        html = ""
+        for url in urls_to_try:
+            try:
+                r = requests.get(url, headers=headers, timeout=15)
+                if r.status_code == 404:
+                    continue  # fallback vers l'URL suivante
+                r.raise_for_status()
+                if "ytInitialData" not in r.text:
+                    continue  # page d'erreur ou consent — essaye l'URL suivante
+                html = r.text
+                break
+            except Exception:
+                continue
+        if not html:
             return {"emails": [], "external_links": []}
+
+        # Si on reçoit quand même la page consent, on est mort
+        if "consent.youtube" in html[:2000]:
+            return {"emails": [], "external_links": []}
+
+        # YouTube encode "&" en "&" dans le JSON inline ytInitialData.
+        # On décode pour que la regex matche les liens redirect?...&q=...
+        html_decoded = html.replace("\\u0026", "&")
 
         # 1) Liens externes : YouTube enrobe tous les liens externes dans
         #    https://www.youtube.com/redirect?...&q=<URL>
-        ext_links_raw = _REDIRECT_RE.findall(html)
+        ext_links_raw = _REDIRECT_RE.findall(html_decoded)
         from urllib.parse import unquote
         ext_links: list[str] = []
         seen = set()
@@ -226,12 +263,17 @@ class YouTubeAPI:
         # 2) Emails : YouTube met parfois l'email contact dans le HTML
         #    (uniquement si l'utilisateur l'a rendu public).
         emails: list[str] = []
-        for m in _EMAIL_RE_PAGE.findall(html):
+        for m in _EMAIL_RE_PAGE.findall(html_decoded):
             e = m.lower()
             if any(b in e for b in _EMAIL_BLACKLIST):
                 continue
             if e not in emails:
                 emails.append(e)
+
+        # Nettoyage des faux positifs : le HTML YouTube colle parfois plusieurs
+        # mots (ex: "business@mkbhd.com" suivi de "NYC" → "business@mkbhd.comnyc").
+        # Si un email plus court est préfixe d'un autre, on garde le plus court.
+        emails = _dedupe_collapsed_emails(emails)
 
         return {"emails": emails[:5], "external_links": ext_links[:10]}
 

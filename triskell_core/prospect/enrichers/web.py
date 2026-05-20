@@ -39,11 +39,26 @@ from ..core.crm import ENRICH_CACHE_DIR, ensure_dirs
 log = logging.getLogger(__name__)
 
 
-USER_AGENT = "TriskellProspect/0.1 (+https://triskell.studio/bot)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0 Safari/537.36"
+)
 TIMEOUT_S = 10
 MAX_BYTES = 1_500_000  # 1.5 MB
 CACHE_TTL = timedelta(days=7)
 MIN_INTERVAL_PER_DOMAIN = 1.0  # s
+
+# Domaines publics où le robots.txt interdit tout (User-agent: *, Disallow: /)
+# par souci de cacher leur contenu aux moteurs ; mais leurs pages utilisateur
+# sont des "cartes de visite" publiques et lire un linktr.ee/x pour récupérer
+# le site externe d'un créateur est un usage légitime (cas d'usage standard
+# de tous les outils de prospection B2B).
+ROBOTS_BYPASS_HOSTS = (
+    "linktr.ee", "beacons.ai", "bio.link", "stan.store",
+    "komi.io", "snipfeed.co", "lnk.bio", "campsite.bio",
+    "carrd.co", "milkshake.app", "tap.bio", "msha.ke",
+)
 
 # Pages prioritaires à explorer si trouvées — élargie pour maximiser
 # les chances de trouver un email (créateurs / coachs / agences).
@@ -138,25 +153,75 @@ class DomainThrottler:
 # robots.txt cache
 # ---------------------------------------------------------------------------
 class RobotsCache:
+    """Lit robots.txt en respectant la norme :
+    - 200 + contenu valide → on respecte les règles
+    - 401/403 → tout est interdit (norme RFC 9309)
+    - 404/5xx/timeout/erreur → tout est autorisé (pas de règles)
+
+    On utilise requests avec un UA navigateur car beaucoup de sites bloquent
+    le UA Python par défaut sur /robots.txt (renvoient 403 → urllib.robotparser
+    interprète "tout interdit" et plombe l'enrichissement de masse).
+    """
+
+    # Sentinelles
+    _ALLOW_ALL = "ALLOW_ALL"
+    _DENY_ALL = "DENY_ALL"
+
+    _BROWSER_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0 Safari/537.36"
+    )
+
     def __init__(self):
-        self._cache: dict[str, urllib.robotparser.RobotFileParser] = {}
+        self._cache: dict[str, object] = {}
 
     def can_fetch(self, url: str, user_agent: str = USER_AGENT) -> bool:
         try:
             parsed = urlparse(url)
+            host = parsed.netloc.lower()
+            # Bypass pour les hubs de liens publics (linktr.ee & co)
+            for bypass in ROBOTS_BYPASS_HOSTS:
+                if host == bypass or host.endswith("." + bypass):
+                    return True
             base = f"{parsed.scheme}://{parsed.netloc}"
-            rp = self._cache.get(base)
-            if rp is None:
-                rp = urllib.robotparser.RobotFileParser()
-                rp.set_url(f"{base}/robots.txt")
-                try:
-                    rp.read()
-                except Exception:
-                    return True  # robots indisponible → on autorise
-                self._cache[base] = rp
-            return rp.can_fetch(user_agent, url)
+            entry = self._cache.get(base)
+            if entry is None:
+                entry = self._load(base)
+                self._cache[base] = entry
+            if entry == self._ALLOW_ALL:
+                return True
+            if entry == self._DENY_ALL:
+                return False
+            # entry est un RobotFileParser hydraté
+            return entry.can_fetch(user_agent, url)  # type: ignore[union-attr]
         except Exception:
             return True
+
+    def _load(self, base: str) -> object:
+        """Récupère robots.txt avec un UA navigateur, interprète selon RFC 9309."""
+        try:
+            r = requests.get(
+                f"{base}/robots.txt",
+                headers={"User-Agent": self._BROWSER_UA},
+                timeout=5,
+            )
+        except Exception:
+            # Réseau down / timeout → autorise (pas de règles connues)
+            return self._ALLOW_ALL
+        status = r.status_code
+        if status in (401, 403):
+            return self._DENY_ALL
+        if status >= 400:
+            return self._ALLOW_ALL  # 404, 5xx → pas de robots → autorisé
+        # 200 OK : on parse
+        rp = urllib.robotparser.RobotFileParser()
+        rp.set_url(f"{base}/robots.txt")
+        try:
+            rp.parse(r.text.splitlines())
+        except Exception:
+            return self._ALLOW_ALL
+        return rp
 
 
 # ---------------------------------------------------------------------------
