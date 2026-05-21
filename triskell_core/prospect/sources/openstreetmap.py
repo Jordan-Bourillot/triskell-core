@@ -86,17 +86,30 @@ class OSMAPI:
         if not filters:
             raise ValueError(f"catégorie OSM inconnue : {category}")
 
-        # Construit la requête Overpass QL
+        # Construit la requête Overpass QL.
         # Note : Overpass est strict sur la syntaxe. On utilise :
         # area["name"="X"]->.a; puis nwr[...](area.a); out body N;
-        email_filter = '["contact:email"]' if require_email else ""
-        filter_lines = "\n".join(
-            f'  nwr[{self._tag_filter(k, v)}]{email_filter}(area.a);'
-            for k, v in filters
-        )
+        # Pour le filtre email : beaucoup d'établissements taggent juste
+        # "email" (forme historique) et d'autres "contact:email" (forme
+        # recommandée). On émet une ligne par tag email pour ne rater
+        # aucun des deux — sinon on perd ~50% des résultats.
+        if require_email:
+            email_tags = ['["contact:email"]', '["email"]']
+        else:
+            email_tags = [""]
+        filter_lines_list: list[str] = []
+        for k, v in filters:
+            tag_filter = self._tag_filter(k, v)
+            for ef in email_tags:
+                filter_lines_list.append(
+                    f'  nwr[{tag_filter}]{ef}(area.a);'
+                )
+        filter_lines = "\n".join(filter_lines_list)
 
+        # Cap dur sur le nombre demandé : Overpass est lent en France entière.
+        # Timeout serveur côté Overpass (90s) > timeout réseau côté client (120s).
         ql = (
-            f'[out:json][timeout:30];\n'
+            f'[out:json][timeout:90];\n'
             f'area["name"="{self._escape(area)}"]->.a;\n'
             f'(\n{filter_lines}\n);\n'
             f'out body {max_results};\n'
@@ -111,7 +124,7 @@ class OSMAPI:
                     "Accept": "application/json",
                 },
                 max_retries=2,
-                timeout=45,
+                timeout=120,
             )
         except SourceHttpError as e:
             raise RuntimeError(f"OpenStreetMap a échoué : {e}") from e
@@ -120,10 +133,28 @@ class OSMAPI:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            # Overpass renvoie parfois du HTML d'erreur (timeout, rate limit)
-            return []
+            # Overpass renvoie parfois du HTML d'erreur (timeout, rate limit,
+            # area inconnue). On lève une vraie exception pour que l'utilisateur
+            # comprenne dans le log (avant : silencieux → 0 bruts mystérieux).
+            snippet = (text or "")[:200].strip().replace("\n", " ")
+            raise RuntimeError(
+                f"OpenStreetMap : Overpass a renvoyé une réponse non-JSON "
+                f"(timeout, rate-limit, ou zone « {area} » introuvable). "
+                f"Essaie une zone plus petite (ville plutôt que pays). "
+                f"Début de la réponse : {snippet}"
+            )
         elements = data.get("elements", []) or []
-        return [self._to_prospect(e, category) for e in elements
+        # Dédup par id (les multiples lignes nwr peuvent retourner le même POI
+        # plusieurs fois s'il a à la fois contact:email et email).
+        seen: set[str] = set()
+        unique: list[dict] = []
+        for e in elements:
+            key = f"{e.get('type')}:{e.get('id')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(e)
+        return [self._to_prospect(e, category) for e in unique
                 if self._has_useful_data(e)]
 
     @staticmethod
