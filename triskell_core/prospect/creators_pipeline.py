@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable
 
 from .core.crm import CONFIG_FILE
+from .enrichers.email_filter import filter_emails, guess_email_from_url
 from .enrichers.linktree import LinktreeFollower, is_hub
 from .enrichers.monetization import is_social_url
 from .enrichers.web import WebEnricher
@@ -31,7 +32,10 @@ from .sources.dailymotion import DailymotionAPI
 from .sources.github import GitHubAPI
 from .sources.kick import KickAPI
 from .sources.mastodon import MastodonAPI
+from .sources.openstreetmap import OSMAPI
 from .sources.podcasts import ApplePodcastsAPI
+from .sources.pubmed import PubMedAPI
+from .sources.pypi import PyPIAPI
 from .sources.reddit import RedditAPI
 from .sources.twitch import TwitchAPI
 from .sources.youtube import YouTubeAPI
@@ -59,11 +63,23 @@ class AutopilotConfig:
     enrich_web: bool = True
     daily_cap: int = 20
 
+    # Si True, l'étape 3 (génération IA des mails) est sautée. Triskell Command
+    # s'en sert pour ne faire que collecte + enrichissement + upload dans la
+    # liste prospects, sans écrire de brouillons. L'envoi/draft se gère à la
+    # main depuis l'UI Triskell ensuite.
+    skip_ai: bool = False
+
     # Biais géographique / linguistique sur la recherche YouTube
     # (et autres sources qui supportent ces params). Vide = mondial.
     # Ex : search_lang='fr', search_region='FR' pour cibler la France.
     search_lang: str = ""
     search_region: str = ""
+
+    # OpenStreetMap : zone géographique (commune, département, pays) + catégorie.
+    # Ex : osm_area="Rennes", osm_category="restaurants"
+    # Catégories possibles : voir openstreetmap.CATEGORIES.
+    osm_area: str = "France"
+    osm_category: str = "restaurants"
 
     # IA
     ai_provider: str = "google"
@@ -161,35 +177,17 @@ def _prospect_key(p: dict) -> str:
 
 
 def _infer_standard_emails(url: str) -> list[str]:
-    """Génère une liste d'emails standards plausibles depuis un domaine.
+    """Devine UN email pro à partir de l'URL du site d'un prospect.
 
-    Quand le crawl web n'a rien trouvé, on essaye « contact@domain.com »
-    et autres patterns courants. Ces emails sont marqués comme inférés
-    (`emails_inferred = True`) — à valider à la main avant envoi en masse.
+    Délègue au filtre central (`enrichers.email_filter`) qui :
+    - bloque les domaines de plateformes (skool, tiktok, base44, bit.ly...),
+    - aplatit les sous-domaines exotiques (links.foo.com → foo.com),
+    - vérifie le MX du domaine avant d'inventer un mail dessus.
+
+    Retourne une liste 0 ou 1 élément (jamais 3) pour éviter les bounces.
     """
-    from urllib.parse import urlparse
-    try:
-        host = urlparse(url if url.startswith("http") else "https://" + url).netloc
-    except Exception:
-        return []
-    host = host.lower().lstrip("www.")
-    if not host or "." not in host:
-        return []
-    # On exclut les hébergeurs / réseaux où contact@ n'aurait pas de sens
-    blacklist_hosts = (
-        "github.io", "wordpress.com", "blogspot.com", "wixsite.com",
-        "weebly.com", "linktr.ee", "beacons.ai", "lnk.bio",
-    )
-    if any(host.endswith(b) for b in blacklist_hosts):
-        return []
-    candidates = [
-        f"contact@{host}",
-        f"hello@{host}",
-        f"booking@{host}",
-        f"partenariats@{host}",
-        f"collab@{host}",
-    ]
-    return candidates[:3]  # max 3 pour ne pas spammer 5 adresses non-validées
+    guess = guess_email_from_url(url)
+    return [guess] if guess else []
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +331,43 @@ def run_creators_pipeline(
         except Exception as e:
             stats["errors"].append(f"github: {e}")
 
+    if "pypi" in cfg.platforms:
+        try:
+            api = PyPIAPI()
+            packages = api.search_packages(
+                cfg.niche, max_results=cfg.max_per_platform,
+                enrich_limit=min(30, cfg.max_per_platform),
+            )
+            new_prospects.extend(packages)
+            log(f"  PyPI : +{len(packages)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"pypi: {e}")
+
+    if "osm" in cfg.platforms:
+        try:
+            api = OSMAPI()
+            pois = api.search_local(
+                category=cfg.osm_category,
+                area=cfg.osm_area,
+                max_results=cfg.max_per_platform,
+                require_email=True,
+            )
+            new_prospects.extend(pois)
+            log(f"  OpenStreetMap ({cfg.osm_category}@{cfg.osm_area}) : +{len(pois)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"osm: {e}")
+
+    if "pubmed" in cfg.platforms:
+        try:
+            api = PubMedAPI(denicheur_cfg.get("pubmed_api_key", ""))
+            papers = api.search_papers(
+                cfg.niche, max_results=cfg.max_per_platform,
+            )
+            new_prospects.extend(papers)
+            log(f"  PubMed : +{len(papers)} bruts")
+        except Exception as e:
+            stats["errors"].append(f"pubmed: {e}")
+
     # Filtre les déjà-connus
     fresh = [p for p in new_prospects if _prospect_key(p) not in existing_keys]
     log(f"  → {len(fresh)} nouveaux après dédup")
@@ -422,13 +457,11 @@ def run_creators_pipeline(
                     data = linktree.enrich_hub(url)
                 else:
                     data = web.enrich_url(url)
-                if data.get("emails"):
-                    p["emails"] = list(data["emails"])[:5]
+                scraped = filter_emails(list(data.get("emails") or []))
+                if scraped:
+                    p["emails"] = scraped[:3]
                     n_enriched += 1
                 else:
-                    # Pas d'email trouvé par crawl → on génère des candidats
-                    # standards basés sur le domaine du site. Marqués comme
-                    # "inférés" pour distinction.
                     inferred = _infer_standard_emails(url)
                     if inferred:
                         p["emails"] = inferred
@@ -447,6 +480,10 @@ def run_creators_pipeline(
             f"(+ {n_inferred} avec email inféré standard)")
 
     # ---- Étape 3 : Génération IA + envoi/draft ----
+    if cfg.skip_ai:
+        log("Étape 3/4 — IA sautée (mode collecte/enrichissement seul).")
+        stats["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        return stats
     log(f"Étape 3/4 — IA + envoi (mode {cfg.mode})…")
     api_keys = (denicheur_cfg.get("ai_api_keys") or {})
     if not api_keys.get(cfg.ai_provider):

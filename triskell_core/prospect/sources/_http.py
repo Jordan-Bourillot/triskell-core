@@ -214,3 +214,47 @@ def get_json(url: str, **kwargs: Any) -> dict | list | None:
 
 def post_json(url: str, **kwargs: Any) -> dict | list | None:
     return request_json("POST", url, **kwargs)
+
+
+def get_text(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    backoff_base: float = DEFAULT_BACKOFF_BASE,
+    backoff_cap: float = DEFAULT_BACKOFF_CAP,
+) -> str:
+    """GET qui renvoie le texte brut (HTML, XML, RSS). Même retry/backoff
+    que `request_json`. Lève SourceHttpError si HTTP non-200."""
+    sess = get_session()
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        _RATE_LIMITER.wait(url)
+        try:
+            r = sess.get(url, params=params, headers=headers, timeout=timeout)
+        except requests.RequestException as e:
+            last_err = e
+            if attempt < max_retries:
+                time.sleep(_backoff_seconds(attempt, backoff_base, backoff_cap))
+                continue
+            raise SourceHttpError(f"network error on {url} : {e}", url=url) from e
+        if r.status_code == 200:
+            return r.text or ""
+        if r.status_code in (429,) or 500 <= r.status_code < 600:
+            if attempt < max_retries:
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        time.sleep(min(float(retry_after), backoff_cap))
+                    except ValueError:
+                        time.sleep(_backoff_seconds(attempt, backoff_base, backoff_cap))
+                else:
+                    time.sleep(_backoff_seconds(attempt, backoff_base, backoff_cap))
+                continue
+        raise SourceHttpError(
+            f"HTTP {r.status_code} on {url}",
+            status=r.status_code, url=url,
+        )
+    raise SourceHttpError(f"unreachable on {url} : {last_err}", url=url)
