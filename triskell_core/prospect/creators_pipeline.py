@@ -59,6 +59,12 @@ class AutopilotConfig:
     enrich_web: bool = True
     daily_cap: int = 20
 
+    # Biais géographique / linguistique sur la recherche YouTube
+    # (et autres sources qui supportent ces params). Vide = mondial.
+    # Ex : search_lang='fr', search_region='FR' pour cibler la France.
+    search_lang: str = ""
+    search_region: str = ""
+
     # IA
     ai_provider: str = "google"
     ai_model: str = "gemini-2.5-flash"
@@ -217,27 +223,13 @@ def run_creators_pipeline(
             yt_key = denicheur_cfg.get("youtube_api_key", "")
             if yt_key:
                 api = YouTubeAPI(yt_key, denicheur_cfg.get("youtube_api_keys") or [])
-                ids = api.search_channels(cfg.niche, max_results=cfg.max_per_platform)
+                ids = api.search_channels(
+                    cfg.niche,
+                    max_results=cfg.max_per_platform,
+                    relevance_language=cfg.search_lang or "",
+                    region_code=cfg.search_region or "",
+                )
                 raw_list = api.get_channels_details(ids)
-                # ⚡ Scrape la page /about de chaque chaîne pour récupérer
-                # les liens externes (Instagram/TikTok/site perso) et
-                # l'email contact, que l'API Data v3 ne renvoie PAS.
-                # On limite à 30 chaînes pour ne pas exploser le temps total.
-                scrape_limit = min(30, len(raw_list))
-                if scrape_limit > 0:
-                    log(f"  YouTube : scrape /about de {scrape_limit} chaînes…")
-                for raw in raw_list[:scrape_limit]:
-                    try:
-                        about = api.scrape_about_page(
-                            channel_id=raw.get("id"),
-                            handle=raw.get("handle") or "",
-                        )
-                        if about.get("emails"):
-                            raw["emails"] = about["emails"]
-                        if about.get("external_links"):
-                            raw["urls_in_bio"] = about["external_links"]
-                    except Exception:
-                        continue
                 for raw in raw_list:
                     if cfg.only_unmonetized:
                         from .enrichers.monetization import detect_monetization
@@ -345,6 +337,45 @@ def run_creators_pipeline(
     fresh = [p for p in new_prospects if _prospect_key(p) not in existing_keys]
     log(f"  → {len(fresh)} nouveaux après dédup")
 
+    # ⚡ Scrape la page /about de chaque chaîne YouTube nouvelle pour
+    # récupérer les liens externes (site perso, Instagram, Linktree…) et
+    # l'email contact (rare mais possible) — infos absentes de l'API Data v3.
+    # Indispensable pour que l'étape 2 (enrich web) ait un site à crawler
+    # et trouve un email, sinon le filtre `only_with_email` rejette tout.
+    # Fait APRÈS le dédup pour ne pas gaspiller du temps sur des chaînes
+    # déjà connues. Parallélisé (15 chaînes en même temps).
+    yt_fresh = [p for p in fresh if (p.get("platform") or "").lower() == "youtube"]
+    if yt_fresh:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        log(f"  YouTube : scrape /about de {len(yt_fresh)} nouvelle(s) chaîne(s)…")
+
+        def _scrape_one(raw):
+            try:
+                return raw, YouTubeAPI.scrape_about_page(
+                    channel_id=raw.get("id"),
+                    handle=raw.get("handle") or "",
+                )
+            except Exception:
+                return raw, {"emails": [], "external_links": []}
+
+        scraped_with_email = 0
+        scraped_with_links = 0
+        with ThreadPoolExecutor(max_workers=15) as pool:
+            futures = [pool.submit(_scrape_one, p) for p in yt_fresh]
+            for fut in as_completed(futures):
+                try:
+                    raw, about = fut.result()
+                except Exception:
+                    continue
+                if about.get("emails"):
+                    raw["emails"] = about["emails"]
+                    scraped_with_email += 1
+                if about.get("external_links"):
+                    raw["urls_in_bio"] = about["external_links"]
+                    scraped_with_links += 1
+        log(f"  YouTube : scrape /about → "
+            f"{scraped_with_email} email(s), {scraped_with_links} avec liens externes")
+
     # Enrichit déjà avec monétisation et contacts (l'app Le Dénicheur le fait
     # normalement dans run_search, mais ici on saute, alors on le fait à la main)
     from .enrichers.monetization import detect_monetization, extract_contacts
@@ -354,7 +385,7 @@ def run_creators_pipeline(
         p["monetized"] = det["monetized"]
         p["monetization_reasons"] = det["reasons"]
         # Ne PAS écraser urls_in_bio/emails/phones si déjà remplis par le
-        # scrape /about YouTube (lignes 229-240) — sinon on perd les liens
+        # scrape /about YouTube juste au-dessus — sinon on perd les liens
         # externes et l'email contact, ce qui fait que l'étape 2 d'enrich
         # web ne trouve rien et que le filtre `only_with_email` rejette tout.
         contacts = extract_contacts(desc)

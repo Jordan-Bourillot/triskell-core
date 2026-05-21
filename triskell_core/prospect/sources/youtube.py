@@ -106,8 +106,15 @@ class YouTubeAPI:
     # ------------------------------------------------------------------
     # Recherche
     # ------------------------------------------------------------------
-    def search_channels(self, query: str, max_results: int = 50) -> list[str]:
-        """Cherche des chaînes par mot-clé. Renvoie les channel IDs."""
+    def search_channels(self, query: str, max_results: int = 50,
+                        relevance_language: str = "",
+                        region_code: str = "") -> list[str]:
+        """Cherche des chaînes par mot-clé. Renvoie les channel IDs.
+
+        relevance_language : code ISO-639-1 (ex: 'fr') — biaise les résultats
+            vers cette langue. C'est une PRÉFÉRENCE, pas un filtre strict.
+        region_code : code pays ISO-3166-1 (ex: 'FR') — biaise géographiquement.
+        """
         if not self.available():
             return []
         ids: list[str] = []
@@ -121,6 +128,10 @@ class YouTubeAPI:
                 "maxResults": min(50, max_results - len(ids)),
                 "key": self.api_key,
             }
+            if relevance_language:
+                params["relevanceLanguage"] = relevance_language
+            if region_code:
+                params["regionCode"] = region_code
             if page_token:
                 params["pageToken"] = page_token
             data = self._get_with_rotation(f"{self.BASE}/search", params, "search")
@@ -237,7 +248,15 @@ class YouTubeAPI:
 
         # YouTube encode "&" en "&" dans le JSON inline ytInitialData.
         # On décode pour que la regex matche les liens redirect?...&q=...
-        html_decoded = html.replace("\\u0026", "&")
+        # On neutralise aussi les escapes JSON littérales (\\n, \\t, \\r) qui
+        # colleraient sinon un "n" / "t" / "r" devant l'email suivant
+        # (ex: "Business:\\nbusiness@mkbhd.com" → faux positif "nbusiness@…").
+        html_decoded = (
+            html.replace("\\u0026", "&")
+                .replace("\\n", " ")
+                .replace("\\r", " ")
+                .replace("\\t", " ")
+        )
 
         # 1) Liens externes : YouTube enrobe tous les liens externes dans
         #    https://www.youtube.com/redirect?...&q=<URL>
