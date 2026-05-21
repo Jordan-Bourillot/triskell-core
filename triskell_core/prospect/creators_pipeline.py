@@ -353,10 +353,17 @@ def run_creators_pipeline(
         det = detect_monetization(desc)
         p["monetized"] = det["monetized"]
         p["monetization_reasons"] = det["reasons"]
-        p["urls_in_bio"] = det["urls"]
+        # Ne PAS écraser urls_in_bio/emails/phones si déjà remplis par le
+        # scrape /about YouTube (lignes 229-240) — sinon on perd les liens
+        # externes et l'email contact, ce qui fait que l'étape 2 d'enrich
+        # web ne trouve rien et que le filtre `only_with_email` rejette tout.
         contacts = extract_contacts(desc)
-        p["emails"] = contacts["emails"]
-        p["phones"] = contacts["phones"]
+        if not p.get("urls_in_bio"):
+            p["urls_in_bio"] = det["urls"]
+        if not p.get("emails"):
+            p["emails"] = contacts["emails"]
+        if not p.get("phones"):
+            p["phones"] = contacts["phones"]
         p["found_at"] = datetime.now().isoformat(timespec="seconds")
         p["status"] = "new"
         p["saved_at"] = datetime.now().isoformat(timespec="seconds")
