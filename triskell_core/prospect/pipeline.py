@@ -671,12 +671,16 @@ def _run_ai_outreach(
         return (0, 0)
 
     # === Mode "pioche dans templates" (Auto-pilote v2, etape 6) ===
-    # Si cfg.autopilot_product est rempli, on tente d'utiliser les templates
-    # de prospection deja prets (table triskell_email_templates) au lieu de
-    # la generation libre. Si l'import echoue ou aucun template n'est dispo,
-    # fallback automatique sur la generation libre.
+    # Si cfg.autopilot_product est rempli, on utilise EXCLUSIVEMENT les
+    # templates de prospection deja prets (table triskell_email_templates).
+    # On ne retombe JAMAIS en generation libre -- Jordan a explicitement
+    # demande ce comportement : "le produit a tout ce qu'il lui faut, on ne
+    # lui demande pas d'analyser quoi que ce soit de plus".
+    # Si aucun template n'est trouve pour le produit, on skippe tous les
+    # prospects avec un message clair plutot que d'inventer un mail.
     templates_for_picking: list[dict] = []
     use_templates = bool((cfg.autopilot_product or "").strip())
+    templates_load_error: str = ""
     if use_templates:
         try:
             from triskell_command.integrations.prospection_templates import (
@@ -689,14 +693,23 @@ def _run_ai_outreach(
             log(f"  -> mode templates : {len(templates_for_picking)} template(s) "
                 f"trouve(s) pour produit '{cfg.autopilot_product}'")
             if not templates_for_picking:
-                use_templates = False
-                log("  [WARN] aucun template pour ce produit -> fallback IA libre")
+                templates_load_error = (
+                    f"Aucun template de prospection pour le produit "
+                    f"'{cfg.autopilot_product}'. Va dans Modeles de mails > "
+                    f"Prospection et active au moins un template pour ce "
+                    f"produit. Aucun mail ne sera redige tant que c'est vide."
+                )
+                log(f"  [ERR] {templates_load_error}")
         except ImportError as exc:
-            use_templates = False
-            log(f"  [WARN] mode templates indisponible ({exc}) -> fallback IA libre")
+            templates_load_error = (
+                f"Mode templates indisponible ({exc}). Aucun mail ne sera redige."
+            )
+            log(f"  [ERR] {templates_load_error}")
         except Exception as exc:
-            use_templates = False
-            log(f"  [WARN] chargement templates a plante ({exc}) -> fallback IA libre")
+            templates_load_error = (
+                f"Chargement des templates plante ({exc}). Aucun mail ne sera redige."
+            )
+            log(f"  [ERR] {templates_load_error}")
 
     # Méga-prompts : on ne les charge PAS pour la rédaction de mails de
     # prospection. Ces prompts (Honnêteté brutale, Anti-hallucination, ...)
@@ -835,6 +848,16 @@ def _run_ai_outreach(
                          "name": _prospect_label, "action": "skipped",
                          "reason": _why})
                     continue
+
+            # Garde-fou : si un produit est selectionne mais aucun template
+            # n'est dispo (ou chargement plante), on skippe tous les prospects
+            # avec un message clair plutot que de retomber en generation libre.
+            if use_templates and not templates_for_picking:
+                log(f"  [skip] {prospect.name[:30]} : {templates_load_error}")
+                log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
+                     "name": _prospect_label, "action": "skipped",
+                     "reason": "aucun template prospection pour ce produit"})
+                continue
 
             if use_templates:
                 # === Mode templates : pioche le bon modele puis adapte ===
@@ -1149,26 +1172,18 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
     industry = prospect.industry or "—"
     description = prospect.description or "—"
 
-    audience = _detect_audience(prospect, cfg)
-    if audience == "creator":
-        ton_instruction = (
-            "TON ET FORMULATION : ce prospect est un créateur / influenceur. "
-            "TUTOIEMENT autorisé MAIS SANS familiarité -- on ne connaît pas "
-            "ce prospect personnellement. Reste poli et respectueux. "
-            "Salutation : 'Bonjour <prénom>,' (ou 'Salut <prénom>,' si vraiment "
-            "le ton de la chaîne s'y prête, sinon Bonjour). "
-            "Formule de fin obligatoire : 'Cordialement', 'Belle journée' ou "
-            "'À bientôt'. STRICTEMENT INTERDIT : 'Bien à toi', 'Bisous', "
-            "'À tout' ', 'A+', surnoms, blagues, complicité forcée."
-        )
-    else:
-        ton_instruction = (
-            "TON ET FORMULATION : ce prospect est une ENTREPRISE professionnelle. "
-            "VOUVOIEMENT obligatoire et systématique ('Bonjour,', 'vous', 'votre'). "
-            "JAMAIS de tutoiement, même chaleureux. "
-            "Formule de fin : 'Cordialement', 'Bien cordialement'. "
-            "STRICTEMENT INTERDIT toute familiarité."
-        )
+    # Branche tutoiement (createurs / influenceurs) retiree a la demande de
+    # Jordan : il ne veut PLUS jamais d'instructions de tutoiement dans le
+    # prompt, peu importe le type de prospect. Tout le monde est vouvoye.
+    audience = _detect_audience(prospect, cfg)  # garde pour la trace, plus utilise
+    ton_instruction = (
+        "TON ET FORMULATION : VOUVOIEMENT obligatoire et systematique "
+        "('Bonjour,', 'vous', 'votre'). JAMAIS de tutoiement, jamais. "
+        "Formule de fin : 'Cordialement' ou 'Bien cordialement'. "
+        "STRICTEMENT INTERDIT toute familiarite (pas de surnoms, pas de "
+        "'Salut', pas de 'A+', pas de 'Bisous', pas de 'A tout', pas de "
+        "'Bien a toi')."
+    )
 
     mise_en_forme = (
         "MISE EN FORME : tu peux utiliser un peu de gras et de soulignement "
@@ -1188,8 +1203,7 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
         f"- Ville : {city}\n"
         f"- Secteur : {industry}\n"
         f"- Description : {description[:300]}\n"
-        f"- Site web : {prospect.website or '—'}\n"
-        f"- Type : {'créateur / influenceur' if audience == 'creator' else 'entreprise pro'}\n\n"
+        f"- Site web : {prospect.website or '—'}\n\n"
         f"MON PRÉNOM : {cfg.sender_mon_prenom or '(non renseigné)'}\n\n"
         f"{ton_instruction}\n\n"
         f"{mise_en_forme}\n\n"
