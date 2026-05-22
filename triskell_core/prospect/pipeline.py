@@ -732,7 +732,17 @@ def _run_ai_outreach(
         log({"type": "stage_done", "id": "send",   "count": 0, "message": "Rien à envoyer."})
         return (0, 0)
 
-    cap = min(cfg.daily_cap, len(eligible))
+    # Cap effectif = min entre :
+    # - cfg.nightly_target : ce que Jordan a regle dans "Cherche-moi N / run"
+    #   (0 ou non renseigne = pas de cap, on retombe sur daily_cap)
+    # - cfg.daily_cap : plafond de securite global d'envoi sur 24h
+    # - len(eligible) : on n'a pas plus de prospects que ca
+    nightly_target = int(getattr(cfg, "nightly_target", 0) or 0)
+    target_cap = nightly_target if nightly_target > 0 else cfg.daily_cap
+    cap = min(target_cap, cfg.daily_cap, len(eligible))
+    if nightly_target > 0:
+        log(f"  → cap utilisateur (Cherche-moi {nightly_target}/run) "
+            f"appliqué — on traitera {cap} prospect(s) max")
     log(f"  → {cap} prospect(s) éligibles, génération IA…")
     log({"type": "stage_done", "id": "sort", "count": cap,
          "message": f"{cap} prospect(s) prêts à recevoir un mail."})
