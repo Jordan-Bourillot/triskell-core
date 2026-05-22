@@ -281,6 +281,7 @@ class YouTubeAPI:
 
         # 2) Emails : YouTube met parfois l'email contact dans le HTML
         #    (uniquement si l'utilisateur l'a rendu public).
+        from ..enrichers.email_filter import clean_email
         emails: list[str] = []
         for m in _EMAIL_RE_PAGE.findall(html_decoded):
             e = m.lower()
@@ -293,6 +294,16 @@ class YouTubeAPI:
         # mots (ex: "business@mkbhd.com" suivi de "NYC" → "business@mkbhd.comnyc").
         # Si un email plus court est préfixe d'un autre, on garde le plus court.
         emails = _dedupe_collapsed_emails(emails)
+
+        # Filtre central : rejette domaines plateforme/factices, www.*,
+        # local-parts suspects (only/online/more/info). MX skip car DNS
+        # lent pendant un scrape parallélisé.
+        cleaned: list[str] = []
+        for e in emails:
+            ce = clean_email(e)
+            if ce and ce not in cleaned:
+                cleaned.append(ce)
+        emails = cleaned
 
         return {"emails": emails[:5], "external_links": ext_links[:10]}
 

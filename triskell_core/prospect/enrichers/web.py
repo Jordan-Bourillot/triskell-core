@@ -516,17 +516,30 @@ class WebEnricher:
 
 
 def _filter_emails(emails) -> list[str]:
-    """Vire les faux positifs courants : sentry, wixpress, exemples…"""
-    blacklist = (
+    """Vire les faux positifs courants via le filtre central email_filter.
+
+    Couvre : plateformes connues, domaines factices (example.com, aaa.com…),
+    local-parts suspects (only/online/more/info), domaines www.*,
+    + une petite blacklist de domaines de tracking observés sur des sites WordPress/Wix.
+    """
+    from .email_filter import clean_email
+
+    extra_blacklist = (
         "sentry.io", "sentry-next.wixpress.com", "wixpress.com",
-        "example.com", "example.fr", "domain.com", "email.com",
-        "yourcompany.com", "votre-email.com",
     )
-    return [
-        e for e in emails
-        if not any(e.endswith("@" + b) or ("@" in e and e.split("@", 1)[1] == b)
-                   for b in blacklist)
-    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for e in emails:
+        if not isinstance(e, str):
+            continue
+        if any(e.endswith("@" + b) or ("@" in e and e.split("@", 1)[1] == b)
+               for b in extra_blacklist):
+            continue
+        ce = clean_email(e)
+        if ce and ce not in seen:
+            seen.add(ce)
+            out.append(ce)
+    return out
 
 
 def _empty_result() -> dict:

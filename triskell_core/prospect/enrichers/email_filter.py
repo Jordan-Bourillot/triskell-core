@@ -51,6 +51,32 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     "nom-de-domaine.com", "votresite.com", "monsite.com",
 })
 
+# Domaines factices/placeholders qui ne peuvent jamais recevoir de mail réel.
+# Souvent issus de fragments d'URL parsés à tort comme email, ou de
+# placeholders laissés dans des templates de site.
+FAKE_DOMAINS: frozenset[str] = frozenset({
+    "aaa.com", "bbb.com", "ccc.com", "xxx.com",
+    "example.com", "example.fr", "example.org", "example.net",
+    "domain.com", "test.com", "email.com", "mail.com",
+    "gobble.com", "savagex.com",
+    "yourcompany.com", "yoursite.com", "yourbusiness.com",
+    "votre-email.com", "votresite.com", "monsite.com",
+    "nom-de-domaine.com",
+})
+
+# Local-parts qui sont JAMAIS des emails légitimes : presque toujours
+# des fragments de texte/URL ("only" / "online" / "more"...) parsés à tort.
+SUSPICIOUS_LOCAL_PARTS: frozenset[str] = frozenset({
+    "only", "online", "more",
+})
+
+# Local-parts AMBIGUS : légitimes en soi (info@vraie-boite.com existe), mais
+# louches quand combinés avec un domaine factice ou un préfixe www.
+# Ex : "more info on www.xxx.com" → regex naïve qui sort "info@www.xxx.com".
+AMBIGUOUS_LOCAL_PARTS: frozenset[str] = frozenset({
+    "info",
+})
+
 # Préfixes de sous-domaines à aplatir vers le domaine principal.
 # Ex: links.isao.io → isao.io (les mails sont sur le domaine racine,
 # rarement sur un sous-domaine type linkinbio).
@@ -166,10 +192,23 @@ def has_mail_record(domain: str, timeout: float = 3.0) -> bool:
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
+def is_fake_domain(domain: str) -> bool:
+    """Vrai si le domaine est un placeholder factice (jamais valide en réel)."""
+    if not domain:
+        return True
+    d = domain.lower().lstrip(".")
+    if d.startswith("www."):
+        d = d[4:]
+    return d in FAKE_DOMAINS
+
+
 def clean_email(email: str) -> str | None:
     """Nettoie un email :
     - normalise le domaine (lowercase, retire www., aplatit sous-domaine connu),
-    - rejette si plateforme,
+    - rejette si plateforme ou domaine factice,
+    - rejette si local-part toujours suspect (only/online/more — fragments d'URL),
+    - rejette si local-part ambigu (info) COMBINÉ avec un domaine louche,
+    - rejette si domaine commence par "www." (jamais valide en vrai email),
     - rejette si format invalide.
 
     Retourne l'email canonique ou None.
@@ -190,11 +229,28 @@ def clean_email(email: str) -> str | None:
     except ValueError:
         return None
 
-    if is_platform_domain(domain):
+    # 1. Local-part toujours bidon (fragments type "more X on …")
+    if local in SUSPICIOUS_LOCAL_PARTS:
+        return None
+
+    # 2. Domaine qui commence par "www." → jamais un vrai email
+    #    (un vrai MX n'est jamais sur www.exemple.com)
+    if domain.startswith("www."):
+        return None
+
+    # 3. Plateformes et domaines factices
+    if is_platform_domain(domain) or is_fake_domain(domain):
         return None
     norm = normalize_domain(domain)
-    if is_platform_domain(norm):
+    if is_platform_domain(norm) or is_fake_domain(norm):
         return None
+
+    # 4. Local-part ambigu (ex: "info") légitime sauf si on a déjà un autre
+    #    indice louche. Comme on est arrivé ici, le domaine est "propre" :
+    #    on garde l'email. (Les cas www./fake sont déjà filtrés au-dessus.)
+    #    Ce bloc est conservé pour documenter l'intention — si on étend
+    #    AMBIGUOUS_LOCAL_PARTS, on saura quoi vérifier ici.
+
     return f"{local}@{norm}"
 
 
@@ -259,9 +315,13 @@ def guess_email_from_url(url: str, *, verify_mx: bool = True) -> str | None:
 
 __all__ = [
     "PLATFORM_DOMAINS",
+    "FAKE_DOMAINS",
+    "SUSPICIOUS_LOCAL_PARTS",
+    "AMBIGUOUS_LOCAL_PARTS",
     "FLATTEN_PREFIXES",
     "normalize_domain",
     "is_platform_domain",
+    "is_fake_domain",
     "has_mail_record",
     "clean_email",
     "filter_emails",

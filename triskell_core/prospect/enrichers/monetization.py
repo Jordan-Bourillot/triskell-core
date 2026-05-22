@@ -166,12 +166,22 @@ def extract_contacts(text: str) -> dict:
     if not text:
         return {"emails": [], "phones": []}
 
-    emails = set()
+    from .email_filter import clean_email
+
+    raw_emails = set()
     for m in _EMAIL_REGEX_STANDARD.findall(text):
-        emails.add(m.lower())
+        raw_emails.add(m.lower())
     for m in _EMAIL_REGEX_OBFUSCATED.findall(text):
         local, domain, tld = m
-        emails.add(f"{local}@{domain}.{tld}".lower())
+        raw_emails.add(f"{local}@{domain}.{tld}".lower())
+
+    # Filtre central : rejette domaines plateforme/factices, www.*,
+    # local-parts suspects (only/online/more/info).
+    emails = set()
+    for e in raw_emails:
+        ce = clean_email(e)
+        if ce:
+            emails.add(ce)
 
     phones = set()
     for m in _PHONE_REGEX_FR.findall(text):
