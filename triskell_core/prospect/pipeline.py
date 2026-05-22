@@ -800,7 +800,23 @@ def _run_ai_outreach(
     n_sent = 0
     n_pending = 0
     n_reviewed = 0
-    review_enabled = int(getattr(cfg, "autopilot_review_min_score", 0) or 0) > 0
+    # Filet anti-config-corrompue : si la valeur est manquante / 0 / None,
+    # on force a 7 (le defaut PipelineConfig). Sans ca, l'etape 4 "Relit"
+    # restait silencieusement desactivee chez Jordan a cause d'une vieille
+    # config qui n'avait pas le champ.
+    _review_score_raw = getattr(cfg, "autopilot_review_min_score", None)
+    try:
+        _review_score = int(_review_score_raw)
+    except Exception:
+        _review_score = 0
+    if _review_score <= 0:
+        _review_score = 7  # restaure le defaut
+        log("  -> [info] autopilot_review_min_score etait 0 ou absent -> "
+            "force a 7 (defaut). La 2e IA va relire chaque mail.")
+    cfg.autopilot_review_min_score = _review_score
+    review_enabled = _review_score > 0
+    log(f"  -> relecture 2e IA : {'ACTIVE' if review_enabled else 'desactivee'} "
+        f"(seuil={_review_score}/10)")
 
     # === Sender pool (Auto-pilote v2) ===
     # Si la config a un pool d'adresses (autopilot_sender_pool) ET que les
@@ -969,6 +985,17 @@ def _run_ai_outreach(
                         or review["score"] < cfg.autopilot_review_min_score):
                         effective_mode = MODE_VALIDATION
                         log(f"    -> force en brouillon (score insuffisant)")
+                    # === Micro-correction appliquee par la 2e IA ===
+                    # Si la 2e IA a suggere une amelioration du corps (champ
+                    # body_revised non vide), on l'applique sur la version
+                    # texte. Le HTML, lui, vient du template original -- on
+                    # le laisse intact pour preserver la mise en forme. Pour
+                    # afficher la version finale aux clients qui n'ont que
+                    # le HTML, on regenere si pas de body_html existant.
+                    _revised = (review.get("body_revised") or "").strip()
+                    if _revised and _revised != body.strip():
+                        log(f"    -> 2e IA a propose une micro-modification, appliquee.")
+                        body = _revised
                     # Trace la review dans l'historique du prospect (compteur Relit)
                     prospect.history.append({
                         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -976,6 +1003,7 @@ def _run_ai_outreach(
                         "score": review["score"],
                         "verdict": review["verdict"],
                         "comment": review["comment"],
+                        "edited": bool(_revised and _revised != body.strip()),
                     })
                 except Exception as exc:
                     log(f"  [WARN] reviewer plante ({exc}) -> on envoie sans relecture")

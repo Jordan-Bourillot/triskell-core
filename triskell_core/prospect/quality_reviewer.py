@@ -27,23 +27,35 @@ logger = logging.getLogger(__name__)
 
 
 _REVIEW_PROMPT = """\
-Tu es relecteur senior de mails de prospection. Note ce mail sur 10 selon ces \
-criteres :
+Tu es relecteur senior de mails de prospection. Le mail ci-dessous a ete \
+genere a partir d'un template ecrit a la main par l'auteur. Ton role :
 
-- Personnalisation (le mail parle vraiment de ce prospect) : 3 pts
-- Clarte de l'offre (le destinataire comprend ce qu'on propose)   : 3 pts
-- Ton naturel, pas de jargon, pas de bullshit                     : 2 pts
-- Pas de variables non remplies type {nom} ou {{ville}}            : 2 pts
+1) Noter le mail sur 10 selon ces criteres :
+   - Personnalisation (le mail parle vraiment de ce prospect) : 3 pts
+   - Clarte de l'offre (le destinataire comprend ce qu'on propose) : 3 pts
+   - Ton naturel, pas de jargon, pas de bullshit : 2 pts
+   - Pas de variables non remplies type {{nom}} ou {{ville}} : 2 pts
 
-REGLES DE VERDICT :
+2) Eventuellement, proposer UNE micro-amelioration du corps si tu vois un \
+truc vraiment derangeant (phrase bancale, formulation lourde, repetition \
+evidente, mot qui sonne faux pour ce prospect precis). Sinon, laisse-le tel \
+quel. Tu ne reecris JAMAIS le mail en entier : juste 1 a 2 phrases au max.
+
+REGLES :
 - score >= 7 -> verdict 'ok' (envoi autorise)
-- score < 7  -> verdict 'draft' (mettre en brouillon pour validation manuelle)
+- score < 7  -> verdict 'draft' (brouillon pour validation manuelle)
+- Si tu ne proposes aucune amelioration -> body_revised = "" (chaine vide).
+- Si tu en proposes une, body_revised = le corps complet du mail avec ta \
+modif integree (et SEULEMENT ta modif). Le reste du mail reste intact.
+- Ne touche pas a la signature, ni aux URLs, ni au sujet.
+- VOUVOIEMENT obligatoire (jamais de tutoiement).
 
 Reponds UNIQUEMENT en JSON, sans markdown, sans commentaire avant ou apres :
 {{
   "score": <int 1-10>,
   "verdict": "ok" ou "draft",
-  "comment": "<une phrase qui explique la note>"
+  "comment": "<une phrase qui explique la note et eventuellement ce que tu as ajuste>",
+  "body_revised": "<corps modifie OU chaine vide si rien a ajuster>"
 }}
 
 CONTEXTE DU PROSPECT :
@@ -78,7 +90,8 @@ def review_email(
     except ImportError as exc:
         logger.warning("quality_reviewer: providers IA indisponibles (%s)", exc)
         return {"score": 0, "verdict": "draft",
-                "comment": "providers IA indisponibles", "raw": ""}
+                "comment": "providers IA indisponibles",
+                "body_revised": "", "raw": ""}
 
     prompt = _REVIEW_PROMPT.format(
         prospect_context=(prospect_context or "(aucun contexte)").strip()[:600],
@@ -92,7 +105,8 @@ def review_email(
     except Exception as exc:
         logger.warning("quality_reviewer: appel IA a echoue (%s)", exc)
         return {"score": 0, "verdict": "draft",
-                "comment": f"reviewer plante : {exc}", "raw": raw}
+                "comment": f"reviewer plante : {exc}",
+                "body_revised": "", "raw": raw}
 
     return _parse_review(raw)
 
@@ -102,7 +116,8 @@ def _parse_review(raw: str) -> dict[str, Any]:
     raw = (raw or "").strip()
     if not raw:
         return {"score": 0, "verdict": "draft",
-                "comment": "reviewer vide", "raw": ""}
+                "comment": "reviewer vide",
+                "body_revised": "", "raw": ""}
     # Vire d'eventuels backticks markdown autour du JSON
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw,
                      flags=re.IGNORECASE | re.MULTILINE).strip()
@@ -110,12 +125,14 @@ def _parse_review(raw: str) -> dict[str, Any]:
     m = re.search(r"\{[\s\S]*?\}", cleaned)
     if not m:
         return {"score": 0, "verdict": "draft",
-                "comment": "reviewer reponse non-JSON", "raw": raw}
+                "comment": "reviewer reponse non-JSON",
+                "body_revised": "", "raw": raw}
     try:
         data = json.loads(m.group(0))
     except json.JSONDecodeError as exc:
         return {"score": 0, "verdict": "draft",
-                "comment": f"reviewer JSON invalide : {exc}", "raw": raw}
+                "comment": f"reviewer JSON invalide : {exc}",
+                "body_revised": "", "raw": raw}
     try:
         score = int(data.get("score", 0))
     except Exception:
@@ -126,4 +143,6 @@ def _parse_review(raw: str) -> dict[str, Any]:
         # Conservatif : si verdict pas explicite, on se base sur le score
         verdict = "ok" if score >= 7 else "draft"
     comment = str(data.get("comment") or "").strip()[:300]
-    return {"score": score, "verdict": verdict, "comment": comment, "raw": raw}
+    body_revised = str(data.get("body_revised") or "").strip()
+    return {"score": score, "verdict": verdict, "comment": comment,
+            "body_revised": body_revised, "raw": raw}
