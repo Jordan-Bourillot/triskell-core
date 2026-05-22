@@ -82,7 +82,12 @@ class PipelineConfig:
     # IA
     ai_provider: str = "anthropic"
     ai_model: str = "claude-sonnet-4-5"
-    ai_mega_prompts: list[str] = field(default_factory=lambda: ["01"])  # honnêteté brutale par défaut
+    # Méga-prompts : NON utilisés par la rédaction des mails de prospection
+    # (ils sont conçus pour le chat avec Claude et entrent en conflit avec
+    # les consignes mail). Champ gardé pour compat avec d'éventuelles vues
+    # historiques mais le pipeline les ignore explicitement. Cf. selected_megas
+    # dans _run_ai_outreach.
+    ai_mega_prompts: list[str] = field(default_factory=list)
     ai_template_brief: str = (
         "Génère un mail de prospection court (≤ 12 lignes). "
         "L'objet doit être personnalisé avec le nom de l'entreprise. "
@@ -693,12 +698,15 @@ def _run_ai_outreach(
             use_templates = False
             log(f"  [WARN] chargement templates a plante ({exc}) -> fallback IA libre")
 
-    # Charge méga-prompts seulement si mode libre
-    if not use_templates:
-        library = load_packaged_library()
-        selected_megas = [mp for mp in library if mp.get("id") in cfg.ai_mega_prompts]
-    else:
-        selected_megas = []  # pas utilise en mode templates
+    # Méga-prompts : on ne les charge PAS pour la rédaction de mails de
+    # prospection. Ces prompts (Honnêteté brutale, Anti-hallucination, ...)
+    # sont conçus pour le chat avec Claude — ils tutoient l'IA et lui
+    # ordonnent de refuser quand elle manque d'info. Résultat : conflit
+    # avec la consigne "VOUVOIEMENT obligatoire" du prompt prospection, ET
+    # l'IA refuse d'écrire si le prospect n'a que nom+ville+SIREN. Dans le
+    # doute, on n'en charge AUCUN ici, peu importe le contenu de
+    # cfg.ai_mega_prompts (qui peut rester rempli pour d'autres usages).
+    selected_megas = []
 
     log({"type": "stage", "id": "sort", "state": "running",
          "message": "Je trie les prospects pour ne garder que ceux à contacter..."})
@@ -867,6 +875,19 @@ def _run_ai_outreach(
                 subject, body = _parse_ai_response(response, prospect, cfg)
                 body_html = ""  # genere apres signature (cf. plus bas)
                 _tpl_key = "ai_pipeline"
+
+            # === Detection refus IA ===
+            # Si l'IA a refuse d'ecrire et a dump sa meta-analyse a la place
+            # ("PROBLEME MAJEUR", "Je ne peux pas rediger", "impossible de
+            # rediger", "Aucune info exploitable", ...), on skip le prospect
+            # plutot que de stocker un draft inutilisable.
+            if _looks_like_ai_refusal(body):
+                log(f"  [skip] {prospect.name[:30]} : l'IA a refusé d'écrire "
+                    f"(probablement trop peu d'info sur le prospect)")
+                log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
+                     "name": _prospect_label, "action": "skipped",
+                     "reason": "IA a refuse d'ecrire (trop peu d'info)"})
+                continue
 
             # Brouillon redige -> on incremente le compteur "write"
             log({"type": "stage", "id": "write", "state": "running",
@@ -1072,6 +1093,30 @@ def _run_ai_outreach(
     log({"type": "stage_done", "id": "send", "count": n_sent + n_pending,
          "message": f"{n_sent} envoyé(s), {n_pending} en brouillon."})
     return n_sent, n_pending
+
+
+def _looks_like_ai_refusal(body: str) -> bool:
+    """Detecte si l'IA a dump une meta-analyse au lieu d'ecrire le mail.
+
+    Couvre les patterns vus en production (Claude qui refuse) : declarations
+    explicites de probleme, listes de raisons numerotees, contradictions
+    relevees. On verifie en debut de corps pour ne pas voir un faux positif
+    si un vrai mail mentionne le mot 'probleme' en milieu de phrase.
+    """
+    if not body:
+        return False
+    head = body.strip().lower()[:400]
+    markers = (
+        "**probleme majeur**", "**problème majeur**",
+        "problème majeur :", "probleme majeur :",
+        "je ne peux pas rediger", "je ne peux pas rédiger",
+        "impossible de rediger", "impossible de rédiger",
+        "aucune info exploitable",
+        "contradiction directe dans les consignes",
+        "je n'ai pas assez d'info",
+        "je manque d'info pour",
+    )
+    return any(m in head for m in markers)
 
 
 def _detect_audience(prospect: Prospect, cfg: PipelineConfig) -> str:
