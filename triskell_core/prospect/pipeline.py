@@ -671,16 +671,14 @@ def _run_ai_outreach(
         return (0, 0)
 
     # === Mode "pioche dans templates" (Auto-pilote v2, etape 6) ===
-    # Si cfg.autopilot_product est rempli, on utilise EXCLUSIVEMENT les
-    # templates de prospection deja prets (table triskell_email_templates).
-    # On ne retombe JAMAIS en generation libre -- Jordan a explicitement
-    # demande ce comportement : "le produit a tout ce qu'il lui faut, on ne
-    # lui demande pas d'analyser quoi que ce soit de plus".
-    # Si aucun template n'est trouve pour le produit, on skippe tous les
-    # prospects avec un message clair plutot que d'inventer un mail.
+    # Si cfg.autopilot_product est rempli, on tente d'utiliser les templates
+    # de prospection deja prets (table triskell_email_templates) au lieu de
+    # la generation libre. Si le produit n'a PAS de template, on retombe
+    # automatiquement sur la generation libre par l'IA (cas "produit sans
+    # template prevu" -- l'IA ecrit alors le mail toute seule, proprement,
+    # en respectant le ton et la mise en forme du prompt).
     templates_for_picking: list[dict] = []
     use_templates = bool((cfg.autopilot_product or "").strip())
-    templates_load_error: str = ""
     if use_templates:
         try:
             from triskell_command.integrations.prospection_templates import (
@@ -693,23 +691,15 @@ def _run_ai_outreach(
             log(f"  -> mode templates : {len(templates_for_picking)} template(s) "
                 f"trouve(s) pour produit '{cfg.autopilot_product}'")
             if not templates_for_picking:
-                templates_load_error = (
-                    f"Aucun template de prospection pour le produit "
-                    f"'{cfg.autopilot_product}'. Va dans Modeles de mails > "
-                    f"Prospection et active au moins un template pour ce "
-                    f"produit. Aucun mail ne sera redige tant que c'est vide."
-                )
-                log(f"  [ERR] {templates_load_error}")
+                use_templates = False
+                log(f"  [WARN] aucun template prospection pour '{cfg.autopilot_product}' "
+                    f"-> fallback generation libre par l'IA")
         except ImportError as exc:
-            templates_load_error = (
-                f"Mode templates indisponible ({exc}). Aucun mail ne sera redige."
-            )
-            log(f"  [ERR] {templates_load_error}")
+            use_templates = False
+            log(f"  [WARN] mode templates indispo ({exc}) -> fallback generation libre")
         except Exception as exc:
-            templates_load_error = (
-                f"Chargement des templates plante ({exc}). Aucun mail ne sera redige."
-            )
-            log(f"  [ERR] {templates_load_error}")
+            use_templates = False
+            log(f"  [WARN] chargement templates plante ({exc}) -> fallback generation libre")
 
     # Méga-prompts : on ne les charge PAS pour la rédaction de mails de
     # prospection. Ces prompts (Honnêteté brutale, Anti-hallucination, ...)
@@ -848,16 +838,6 @@ def _run_ai_outreach(
                          "name": _prospect_label, "action": "skipped",
                          "reason": _why})
                     continue
-
-            # Garde-fou : si un produit est selectionne mais aucun template
-            # n'est dispo (ou chargement plante), on skippe tous les prospects
-            # avec un message clair plutot que de retomber en generation libre.
-            if use_templates and not templates_for_picking:
-                log(f"  [skip] {prospect.name[:30]} : {templates_load_error}")
-                log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
-                     "name": _prospect_label, "action": "skipped",
-                     "reason": "aucun template prospection pour ce produit"})
-                continue
 
             if use_templates:
                 # === Mode templates : pioche le bon modele puis adapte ===
