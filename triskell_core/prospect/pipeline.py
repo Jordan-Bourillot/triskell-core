@@ -242,6 +242,7 @@ def run_full_pipeline(
     do_enrich: bool = True,
     do_send: bool = True,
     sender_pool_smtp: dict | None = None,
+    templates_override: list[dict] | None = None,
 ) -> PipelineStats:
     """Exécute le pipeline complet en une passe.
 
@@ -323,7 +324,11 @@ def run_full_pipeline(
     if do_send:
         log(f"Étape 3/4 — Génération IA + envoi (mode {cfg.mode})…")
         try:
-            sent, pending = _run_ai_outreach(cfg, log, sender_pool_smtp=sender_pool_smtp)
+            sent, pending = _run_ai_outreach(
+                cfg, log,
+                sender_pool_smtp=sender_pool_smtp,
+                templates_override=templates_override,
+            )
             stats.drafts_generated = sent + pending
             stats.drafts_sent = sent
             stats.drafts_pending = pending
@@ -650,6 +655,7 @@ def _run_ai_outreach(
     log: Callable[[str], None],
     *,
     sender_pool_smtp: dict | None = None,
+    templates_override: list[dict] | None = None,
 ) -> tuple[int, int]:
     """Génère mail IA personnalisé pour chaque prospect éligible, puis envoie OU draft.
 
@@ -671,15 +677,23 @@ def _run_ai_outreach(
         return (0, 0)
 
     # === Mode "pioche dans templates" (Auto-pilote v2, etape 6) ===
-    # Si cfg.autopilot_product est rempli, on tente d'utiliser les templates
-    # de prospection deja prets (table triskell_email_templates) au lieu de
-    # la generation libre. Si le produit n'a PAS de template, on retombe
-    # automatiquement sur la generation libre par l'IA (cas "produit sans
-    # template prevu" -- l'IA ecrit alors le mail toute seule, proprement,
-    # en respectant le ton et la mise en forme du prompt).
+    # Deux sources possibles de templates :
+    #   1) templates_override (kwarg) : preferre. Construit par
+    #      autopilot_runner a partir des produits ACTIFS du catalogue. Permet
+    #      de combiner les templates de plusieurs produits actifs en une
+    #      seule pool, l'IA picker choisira le bon par prospect.
+    #   2) cfg.autopilot_product (legacy) : fallback si pas d'override. Pour
+    #      compat avec d'anciens chemins (Eclaireur, runs manuels).
+    # Si AUCUN des deux ne donne de template, on retombe sur la generation
+    # libre IA (qui ecrira un mail propre sans s'appuyer sur un modele).
     templates_for_picking: list[dict] = []
-    use_templates = bool((cfg.autopilot_product or "").strip())
-    if use_templates:
+    use_templates = False
+    if templates_override:
+        templates_for_picking = list(templates_override)
+        use_templates = True
+        log(f"  -> mode templates (override catalogue) : "
+            f"{len(templates_for_picking)} template(s) charge(s).")
+    elif (cfg.autopilot_product or "").strip():
         try:
             from triskell_command.integrations.prospection_templates import (
                 list_prospection_templates,
@@ -688,18 +702,18 @@ def _run_ai_outreach(
                 product=cfg.autopilot_product.strip(),
                 audience=(cfg.autopilot_audience or "").strip() or None,
             ) or []
+            use_templates = bool(templates_for_picking)
             log(f"  -> mode templates : {len(templates_for_picking)} template(s) "
                 f"trouve(s) pour produit '{cfg.autopilot_product}'")
             if not templates_for_picking:
-                use_templates = False
                 log(f"  [WARN] aucun template prospection pour '{cfg.autopilot_product}' "
                     f"-> fallback generation libre par l'IA")
         except ImportError as exc:
-            use_templates = False
             log(f"  [WARN] mode templates indispo ({exc}) -> fallback generation libre")
         except Exception as exc:
-            use_templates = False
             log(f"  [WARN] chargement templates plante ({exc}) -> fallback generation libre")
+    else:
+        log("  -> pas de produit selectionne et catalogue vide -> generation libre IA.")
 
     # Méga-prompts : on ne les charge PAS pour la rédaction de mails de
     # prospection. Ces prompts (Honnêteté brutale, Anti-hallucination, ...)
@@ -864,10 +878,20 @@ def _run_ai_outreach(
                     "secteur":        prospect.industry or "",
                     "notes":          (prospect.description or "")[:300],
                 }
+                # En mode multi-produits (templates_override), le nom du
+                # "template_product" passe au prompt picker est celui du
+                # premier template (utilise comme libelle d'orientation pour
+                # l'IA). Le picker choisira le bon template parmi tous.
+                tp_label = (
+                    cfg.autopilot_product.strip()
+                    or (templates_for_picking[0].get("product_label")
+                        if templates_for_picking else "")
+                    or "(catalogue actif)"
+                )
                 gen = generate_message_from_templates(
                     prospect_dict,
                     templates=templates_for_picking,
-                    template_product=cfg.autopilot_product.strip(),
+                    template_product=tp_label,
                     sender_name=cfg.sender_mon_prenom or "",
                     user_brief=cfg.ai_template_brief or "",
                     provider=cfg.ai_provider,
