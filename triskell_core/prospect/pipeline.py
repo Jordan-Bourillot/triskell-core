@@ -118,6 +118,13 @@ class PipelineConfig:
     # l'envoi direct (sinon brouillon). 0 = pas de relecture.
     autopilot_review_min_score: int = 7
 
+    # Auto-pilote v2 : plage horaire d'envoi (heure Europe/Paris).
+    # Hors plage -> les mails generes sont mis en brouillons au lieu d'etre
+    # envoyes (l'envoi reprendra naturellement quand on est de nouveau
+    # dans la fenetre). 0..23, inclusif sur le debut, exclusif sur la fin.
+    send_hour_start: int = 8
+    send_hour_end:   int = 19
+
     @classmethod
     def load(cls) -> "PipelineConfig":
         if not PIPELINE_CONFIG_FILE.exists():
@@ -158,6 +165,48 @@ class PipelineStats:
     follow_ups_sent: int = 0
     replies_detected: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Helpers globaux pour l'auto-pilote v2 (etape 8)
+# ---------------------------------------------------------------------------
+def _is_within_send_window(cfg: "PipelineConfig") -> bool:
+    """True si l'heure actuelle (Paris) est dans la plage d'envoi configuree.
+
+    Gere le cas d'une plage qui passe minuit (ex: 22h-2h).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        h = datetime.now(ZoneInfo("Europe/Paris")).hour
+    except Exception:
+        h = datetime.now().hour
+    start = max(0, min(23, int(getattr(cfg, "send_hour_start", 8))))
+    end   = max(0, min(24, int(getattr(cfg, "send_hour_end",   19))))
+    if start == end:
+        return False
+    if start < end:
+        return start <= h < end
+    return h >= start or h < end
+
+
+def _count_mails_sent_last_24h(sb_client) -> int:
+    """Compte les envois (kind='email_sent') sur les 24 dernieres heures
+    glissantes via Supabase. Renvoie 0 en cas d'erreur (fallback prudent :
+    on n'empeche pas l'envoi si la base est down)."""
+    if sb_client is None:
+        return 0
+    try:
+        from datetime import timedelta
+        since = (datetime.now(tz=None) - timedelta(hours=24)).isoformat()
+        r = (sb_client.raw.table("email_history")
+             .select("id", count="exact")
+             .eq("kind", "email_sent")
+             .gte("ts", since)
+             .execute())
+        return int(r.count or 0)
+    except Exception as exc:
+        logger.debug("count_mails_sent_last_24h: %s", exc)
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -619,10 +668,54 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
     cap = min(cfg.daily_cap, len(eligible))
     log(f"  → {cap} prospect(s) éligibles, génération IA…")
 
+    # Etape 8.A : filet anti-doublon Supabase (en plus du check local).
+    # On essaie de recuperer le client Supabase pour pouvoir appeler
+    # has_recent_send(forever=True, check_clients=True). Si pas dispo,
+    # on tombe sur le seul filtre eligible[] (check local p.history).
+    _sb_client = None
+    _PS = None
+    try:
+        from triskell_command.integrations import prospect_status as _PS
+        from ..db import get_client as _get_client
+        _sb_client = _get_client()
+        if _sb_client is None or not _sb_client.is_authenticated:
+            _sb_client = None
+    except Exception as _exc:
+        logger.debug("anti-doublon supabase non dispo: %s", _exc)
+        _sb_client = None
+
+    # Etape 8.C : plafond global 24h glissantes (compte les vrais envois
+    # deja partis depuis 24h, tous canaux confondus). On laisse `cap` (par
+    # run) en plus comme garde-fou local. Si daily_cap est deja atteint,
+    # on sort tout de suite -- inutile de generer des mails qu'on ne pourra
+    # pas envoyer.
+    _already_sent_24h = _count_mails_sent_last_24h(_sb_client)
+    _remaining_quota = max(0, int(cfg.daily_cap) - _already_sent_24h)
+    if _sb_client is not None and _remaining_quota <= 0:
+        log(f"  [stop] plafond {cfg.daily_cap} mails/24h deja atteint "
+            f"({_already_sent_24h} envoyes) -- aucun envoi cette nuit.")
+        return (0, 0)
+    if _sb_client is not None:
+        log(f"  -> quota restant 24h : {_remaining_quota} mails "
+            f"(deja {_already_sent_24h}/{cfg.daily_cap})")
+
     n_sent = 0
     n_pending = 0
     for i, prospect in enumerate(eligible[:cap], 1):
         try:
+            # Anti-doublon Supabase : skip si deja contacte (forever) ou client
+            _to_email = prospect.emails[0] if prospect.emails else ""
+            if _sb_client is not None and _to_email and _PS is not None:
+                _rec = _PS.has_recent_send(
+                    _sb_client, email=_to_email,
+                    forever=True, check_clients=True,
+                )
+                if _rec.get("recent"):
+                    _why = ("deja client" if _rec.get("last_kind") == "client"
+                            else "deja contacte")
+                    log(f"  [skip] {prospect.name[:30]} : {_why} ({_to_email})")
+                    continue
+
             if use_templates:
                 # === Mode templates : pioche le bon modele puis adapte ===
                 from triskell_command.integrations.convoy_ai import (
@@ -699,6 +792,20 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     })
                 except Exception as exc:
                     log(f"  [WARN] reviewer plante ({exc}) -> on envoie sans relecture")
+
+            # Etape 8.B : plage horaire d'envoi (Paris). Hors plage -> draft.
+            if effective_mode == MODE_AUTO and not _is_within_send_window(cfg):
+                effective_mode = MODE_VALIDATION
+                log(f"  -> hors plage horaire ({cfg.send_hour_start}h-"
+                    f"{cfg.send_hour_end}h) -> brouillon au lieu d'envoi direct")
+
+            # Etape 8.C : plafond 24h glissantes. Si on a deja atteint le
+            # quota au cours de la boucle, on bascule en draft pour le reste.
+            if effective_mode == MODE_AUTO and _sb_client is not None:
+                if n_sent >= _remaining_quota:
+                    effective_mode = MODE_VALIDATION
+                    log(f"  -> plafond {cfg.daily_cap} mails/24h atteint "
+                        f"-> brouillon (relance demain)")
 
             if effective_mode == MODE_AUTO:
                 # Envoi direct via SMTP
