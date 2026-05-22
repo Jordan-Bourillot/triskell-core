@@ -125,6 +125,12 @@ class PipelineConfig:
     send_hour_start: int = 8
     send_hour_end:   int = 19
 
+    # Auto-pilote v2 : heure de declenchement du run nocturne (Europe/Paris).
+    # Le runner verifie toutes les 5 min ; quand on est dans la fenetre
+    # [nightly_hour, nightly_hour+1[ ET qu'on n'a pas deja run aujourd'hui,
+    # il declenche la chaine. Defaut 3h. Borne [0, 23].
+    nightly_hour: int = 3
+
     @classmethod
     def load(cls) -> "PipelineConfig":
         if not PIPELINE_CONFIG_FILE.exists():
