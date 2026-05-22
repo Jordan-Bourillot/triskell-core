@@ -132,6 +132,14 @@ class PipelineConfig:
     # il declenche la chaine. Defaut 3h. Borne [0, 23].
     nightly_hour: int = 3
 
+    # Auto-pilote v2 : pool d'adresses expeditrices avec cap individuel 24h
+    # glissantes. Liste de dicts {"account_id": str, "daily_cap": int}.
+    # - Pool vide -> envoi mono-adresse (compte principal), cap global = daily_cap.
+    # - Pool rempli -> a chaque mail, tirage aleatoire d'une adresse dont le cap
+    #   n'est pas encore atteint sur 24h glissantes. Si toutes saturees ->
+    #   bascule en brouillon pour le reste du run.
+    autopilot_sender_pool: list = field(default_factory=list)
+
     @classmethod
     def load(cls) -> "PipelineConfig":
         if not PIPELINE_CONFIG_FILE.exists():
@@ -228,6 +236,7 @@ def run_full_pipeline(
     do_search: bool = True,
     do_enrich: bool = True,
     do_send: bool = True,
+    sender_pool_smtp: dict | None = None,
 ) -> PipelineStats:
     """Exécute le pipeline complet en une passe.
 
@@ -309,7 +318,7 @@ def run_full_pipeline(
     if do_send:
         log(f"Étape 3/4 — Génération IA + envoi (mode {cfg.mode})…")
         try:
-            sent, pending = _run_ai_outreach(cfg, log)
+            sent, pending = _run_ai_outreach(cfg, log, sender_pool_smtp=sender_pool_smtp)
             stats.drafts_generated = sent + pending
             stats.drafts_sent = sent
             stats.drafts_pending = pending
@@ -631,10 +640,20 @@ def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[in
     return n_enriched, n_emails
 
 
-def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[int, int]:
+def _run_ai_outreach(
+    cfg: PipelineConfig,
+    log: Callable[[str], None],
+    *,
+    sender_pool_smtp: dict | None = None,
+) -> tuple[int, int]:
     """Génère mail IA personnalisé pour chaque prospect éligible, puis envoie OU draft.
 
     Renvoie (n_sent, n_pending).
+
+    sender_pool_smtp : dict {account_id: smtp_cfg} optionnel. Si fourni ET
+    que `cfg.autopilot_sender_pool` est non vide, l'envoi utilise le pool
+    multi-adresses (tirage aléatoire respectant les caps 24h glissantes).
+    Sinon : envoi mono-adresse via _load_smtp_config() (legacy).
     """
     from ..ai import providers as ai_providers
     from ..ai.builder import build_ultimate_prompt
@@ -747,6 +766,39 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
     n_pending = 0
     n_reviewed = 0
     review_enabled = int(getattr(cfg, "autopilot_review_min_score", 0) or 0) > 0
+
+    # === Sender pool (Auto-pilote v2) ===
+    # Si la config a un pool d'adresses (autopilot_sender_pool) ET que les
+    # smtp configs ont ete pre-resolues, on active le mode multi-adresses :
+    # a chaque mail, tirage aleatoire d'une adresse dont le cap 24h
+    # glissantes n'est pas atteint. Sinon : envoi mono-adresse.
+    raw_pool = list(getattr(cfg, "autopilot_sender_pool", None) or [])
+    pool = []
+    for entry in raw_pool:
+        if not isinstance(entry, dict):
+            continue
+        aid = str(entry.get("account_id") or "").strip()
+        cap = int(entry.get("daily_cap") or 0)
+        if aid and cap > 0:
+            pool.append({"account_id": aid, "daily_cap": cap})
+    use_pool = bool(pool and sender_pool_smtp)
+    pool_tracker = None
+    pool_counts_24h: dict[str, int] = {}
+    if use_pool:
+        try:
+            from triskell_command.integrations import sender_pool_tracker as _spt
+            pool_tracker = _spt
+            pool_ids = [p["account_id"] for p in pool]
+            pool_counts_24h = pool_tracker.count_sent_24h_by_account(pool_ids)
+            log("  -> sender pool actif : "
+                + ", ".join(f"{p['account_id']} (cap {p['daily_cap']}/24h, "
+                            f"deja {pool_counts_24h.get(p['account_id'], 0)})"
+                            for p in pool))
+        except Exception as exc:
+            log(f"  [WARN] sender pool indisponible ({exc}) -> mono-adresse")
+            use_pool = False
+            pool_tracker = None
+
     log({"type": "stage", "id": "write", "state": "running", "count": 0,
          "message": "Je rédige les mails un par un..."})
     if review_enabled:
@@ -880,15 +932,45 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     log(f"  -> plafond {cfg.daily_cap} mails/24h atteint "
                         f"-> brouillon (relance demain)")
 
+            # === Choix de l'adresse expeditrice ===
+            # Mode pool : tirage aleatoire dans le pool, en respectant les
+            # caps 24h glissantes (deja envoyes via pool_counts_24h cache +
+            # compteur incremente a chaque envoi reussi). Si pool sature ->
+            # bascule en brouillon. Mode mono : "primary" (legacy).
+            sender_account_id = "primary"
+            sender_smtp_cfg = None
+            if effective_mode == MODE_AUTO and use_pool and pool_tracker is not None:
+                pool_with_remaining = [
+                    {"account_id": p["account_id"],
+                     "daily_cap":  max(0, p["daily_cap"]
+                                       - pool_counts_24h.get(p["account_id"], 0))}
+                    for p in pool
+                ]
+                chosen = pool_tracker.pick_random_available_account(pool_with_remaining)
+                if chosen is None:
+                    # Toutes les adresses du pool sont saturees -> brouillon
+                    effective_mode = MODE_VALIDATION
+                    log("  -> toutes les adresses du pool sont au plafond 24h "
+                        "-> brouillon (relance demain)")
+                else:
+                    sender_account_id = chosen["account_id"]
+                    sender_smtp_cfg = (sender_pool_smtp or {}).get(sender_account_id)
+                    if sender_smtp_cfg is None:
+                        # Config SMTP manquante pour ce compte -> brouillon
+                        effective_mode = MODE_VALIDATION
+                        log(f"  -> config SMTP du compte '{sender_account_id}' "
+                            f"absente -> brouillon")
+
             # Signature auto : la boîte expéditrice ajoute sa signature avant
             # envoi (et avant stockage en draft, pour que la validation montre
             # bien le mail final). L'IA s'arrête à "Cordialement, {prénom}" ;
-            # la signature complète est collée derrière.
+            # la signature complète est collée derrière. En mode pool, on prend
+            # la signature liee au compte choisi.
             try:
                 from triskell_command.integrations.signatures import (
                     append_signature_to_body,
                 )
-                body = append_signature_to_body(body, account_id="primary")
+                body = append_signature_to_body(body, account_id=sender_account_id)
             except Exception as _sig_exc:
                 log(f"  [WARN] signature non ajoutée ({_sig_exc})")
 
@@ -913,9 +995,11 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
             if effective_mode == MODE_AUTO:
                 log({"type": "activity",
                      "message": f"J'envoie le mail à {_prospect_label}..."})
-                # Envoi direct via SMTP
+                # Envoi direct via SMTP. En mode pool, on a deja resolu
+                # sender_smtp_cfg via le pool ; sinon on tombe sur le compte
+                # principal (legacy).
                 from .outreach.smtp_sender import _load_smtp_config, send_email
-                smtp_cfg = _load_smtp_config()
+                smtp_cfg = sender_smtp_cfg if sender_smtp_cfg else _load_smtp_config()
                 msg_id = send_email(
                     smtp_cfg, to=prospect.emails[0],
                     subject=subject, body=body, body_html=body_html,
@@ -928,16 +1012,26 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     "template_key": _tpl_key,
                     "message_id": msg_id,
                     "generated_by": f"{cfg.ai_provider}/{cfg.ai_model}",
+                    "account_id": sender_account_id,
+                    "from": (smtp_cfg or {}).get("from_email", ""),
                 })
                 prospect.status = "contacted"
                 prospect.last_contact_at = datetime.now().isoformat(timespec="seconds")
+                # Incremente le cache pool pour le prochain tirage (evite de
+                # re-requeter Supabase a chaque mail).
+                if use_pool:
+                    pool_counts_24h[sender_account_id] = (
+                        pool_counts_24h.get(sender_account_id, 0) + 1
+                    )
                 n_sent += 1
                 log({"type": "stage", "id": "send", "state": "running",
                      "count": n_sent,
-                     "message": f"Dernier mail envoyé : {_prospect_label}"})
+                     "message": f"Dernier mail envoyé : {_prospect_label}"
+                                + (f" (via {sender_account_id})" if use_pool else "")})
                 log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
                      "name": _prospect_label, "action": "sent",
-                     "reason": f"envoyé à {prospect.emails[0]}"})
+                     "reason": f"envoyé à {prospect.emails[0]}"
+                               + (f" depuis {sender_account_id}" if use_pool else "")})
             else:
                 # Mode SAS : on dépose le draft pour validation manuelle
                 prospect.pending_drafts.append({
