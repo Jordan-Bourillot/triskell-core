@@ -2,7 +2,7 @@
 
 Enchaîne sans intervention humaine :
     1. search (Sirene/Maps) → prospects bruts
-    2. enrich (web + footprint + cross-ref) → prospects qualifiés (site_verified)
+    2. enrich (web + footprint + cross-ref) → prospects enrichis
     3. AI personalize → mail unique pour chaque prospect (template-cadre + contexte)
     4. mode AUTO    : envoi SMTP direct
        mode SAS     : draft posé dans pending_drafts (validation manuelle ensuite)
@@ -10,7 +10,7 @@ Enchaîne sans intervention humaine :
     6. poll IMAP → bascule status=replied → stoppe relances
 
 Appelé par :
-    - la nightly (~03:00) avec PipelineConfig persistée
+    - le déclencheur automatique à l'heure réglée dans le tableau de commande
     - manuellement via Triskell Command (vue Auto-pilote → "Lancer maintenant")
 
 Toutes les étapes sont opt-in : tu peux désactiver search (si déjà des prospects),
@@ -247,6 +247,7 @@ def run_full_pipeline(
     # 0) Poll IMAP en premier — pour ne pas relancer ceux qui ont répondu
     # ------------------------------------------------------------------
     if poll_imap:
+        log({"type": "activity", "message": "Je regarde les réponses entrantes dans la boîte mail..."})
         log("Étape 0/4 — Vérification des réponses IMAP…")
         try:
             from .outreach import imap_listener
@@ -263,6 +264,9 @@ def run_full_pipeline(
     # 1) Search
     # ------------------------------------------------------------------
     if do_search and cfg.source != "none":
+        log({"type": "stage", "id": "search", "state": "running",
+             "message": f"Je cherche de nouveaux prospects ({cfg.source})..."})
+        log({"type": "activity", "message": f"Je vais piocher des prospects dans la source : {cfg.source}"})
         log(f"Étape 1/4 — Recherche {cfg.source}…")
         try:
             crm = CRM()
@@ -272,6 +276,8 @@ def run_full_pipeline(
             crm.save()
             stats.searched = r.get("created", 0)
             log(f"  → {stats.searched} nouveau(x) prospect(s) ({r.get('merged', 0)} fusionnés)")
+            log({"type": "stage_done", "id": "search", "count": stats.searched,
+                 "message": f"{stats.searched} nouveau(x) prospect(s) ajouté(s) à la base"})
             try:
                 finalize()
             except Exception as e:
@@ -279,11 +285,17 @@ def run_full_pipeline(
         except Exception as e:
             stats.errors.append(f"search: {e}")
             log(f"  ⚠ {e}")
+            log({"type": "stage_error", "id": "search", "message": str(e)})
+    elif not do_search:
+        log({"type": "stage_done", "id": "search", "count": 0,
+             "message": "Recherche en mode manuel — aucune nouvelle recherche lancée."})
 
     # ------------------------------------------------------------------
-    # 2) Enrich
+    # 2) Enrich (rattache au maillon "Cherche" cote UI)
     # ------------------------------------------------------------------
     if do_enrich:
+        log({"type": "activity",
+             "message": f"J'enrichis les fiches des prospects (max {cfg.enrich_max} sites visités)..."})
         log(f"Étape 2/4 — Enrichissement web (max {cfg.enrich_max})…")
         try:
             stats.enriched, stats.enrich_emails_found = _run_enrichment(cfg, log)
@@ -304,6 +316,16 @@ def run_full_pipeline(
         except Exception as e:
             stats.errors.append(f"send: {e}")
             log(f"  ⚠ {e}")
+            log({"type": "stage_error", "id": "write", "message": str(e)})
+    else:
+        log({"type": "stage_done", "id": "sort",   "count": 0,
+             "message": "Tri en mode manuel — non lancé."})
+        log({"type": "stage_done", "id": "write",  "count": 0,
+             "message": "Rédaction en mode manuel — non lancée."})
+        log({"type": "stage_done", "id": "review", "count": 0,
+             "message": "Relecture non lancée (rédaction en manuel)."})
+        log({"type": "stage_done", "id": "send",   "count": 0,
+             "message": "Envoi non lancé (rédaction en manuel)."})
 
     # ------------------------------------------------------------------
     # 4) Relances J+5 (uniquement mode auto, en sas l'user gère)
@@ -659,21 +681,31 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
     else:
         selected_megas = []  # pas utilise en mode templates
 
+    log({"type": "stage", "id": "sort", "state": "running",
+         "message": "Je trie les prospects pour ne garder que ceux à contacter..."})
+    log({"type": "activity",
+         "message": "Je trie : on garde ceux qui ont un mail et qu'on n'a jamais contactés..."})
     crm = CRM()
     eligible = [
         p for p in crm.all()
         if p.emails
-        and "site_verified" in (p.tags or [])
         and p.status in ("new", "qualified")
         and not any(h.get("kind") == "email_sent" for h in (p.history or []))
         and not p.pending_drafts  # pas déjà un draft en attente
     ]
     if not eligible:
-        log(f"  → 0 prospect(s) éligible(s) (besoin email + site_verified + jamais contacté)")
+        log(f"  → 0 prospect(s) éligible(s) (besoin email + jamais contacté)")
+        log({"type": "stage_done", "id": "sort", "count": 0,
+             "message": "Aucun prospect à contacter (besoin d'un email + jamais contacté)."})
+        log({"type": "stage_done", "id": "write",  "count": 0, "message": "Rien à rédiger."})
+        log({"type": "stage_done", "id": "review", "count": 0, "message": "Rien à relire."})
+        log({"type": "stage_done", "id": "send",   "count": 0, "message": "Rien à envoyer."})
         return (0, 0)
 
     cap = min(cfg.daily_cap, len(eligible))
     log(f"  → {cap} prospect(s) éligibles, génération IA…")
+    log({"type": "stage_done", "id": "sort", "count": cap,
+         "message": f"{cap} prospect(s) prêts à recevoir un mail."})
 
     # Etape 8.A : filet anti-doublon Supabase (en plus du check local).
     # On essaie de recuperer le client Supabase pour pouvoir appeler
@@ -701,6 +733,11 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
     if _sb_client is not None and _remaining_quota <= 0:
         log(f"  [stop] plafond {cfg.daily_cap} mails/24h deja atteint "
             f"({_already_sent_24h} envoyes) -- aucun envoi cette nuit.")
+        log({"type": "stage_done", "id": "write",  "count": 0,
+             "message": f"Plafond {cfg.daily_cap} mails/24h déjà atteint."})
+        log({"type": "stage_done", "id": "review", "count": 0, "message": "Pas de relecture."})
+        log({"type": "stage_done", "id": "send",   "count": 0,
+             "message": f"Quota journalier {cfg.daily_cap} atteint — rien envoyé."})
         return (0, 0)
     if _sb_client is not None:
         log(f"  -> quota restant 24h : {_remaining_quota} mails "
@@ -708,7 +745,20 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
 
     n_sent = 0
     n_pending = 0
+    n_reviewed = 0
+    review_enabled = int(getattr(cfg, "autopilot_review_min_score", 0) or 0) > 0
+    log({"type": "stage", "id": "write", "state": "running", "count": 0,
+         "message": "Je rédige les mails un par un..."})
+    if review_enabled:
+        log({"type": "stage", "id": "review", "state": "running", "count": 0,
+             "message": "La 2è IA relit chaque mail avant validation..."})
+    log({"type": "stage", "id": "send", "state": "running", "count": 0,
+         "message": "J'attends qu'un mail soit prêt à partir..."})
+
     for i, prospect in enumerate(eligible[:cap], 1):
+        _prospect_label = (prospect.name or prospect.legal_name or "(sans nom)")[:60]
+        log({"type": "activity",
+             "message": f"Je rédige le mail pour {_prospect_label}..."})
         try:
             # Anti-doublon Supabase : skip si deja contacte (forever) ou client
             _to_email = prospect.emails[0] if prospect.emails else ""
@@ -721,6 +771,9 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     _why = ("deja client" if _rec.get("last_kind") == "client"
                             else "deja contacte")
                     log(f"  [skip] {prospect.name[:30]} : {_why} ({_to_email})")
+                    log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
+                         "name": _prospect_label, "action": "skipped",
+                         "reason": _why})
                     continue
 
             if use_templates:
@@ -763,12 +816,19 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                 body_html = ""  # genere apres signature (cf. plus bas)
                 _tpl_key = "ai_pipeline"
 
+            # Brouillon redige -> on incremente le compteur "write"
+            log({"type": "stage", "id": "write", "state": "running",
+                 "count": n_sent + n_pending + 1,
+                 "message": f"Dernier mail rédigé : {_prospect_label}"})
+
             # === Etape 7 : 2e IA de relecture ===
             # Si autopilot_review_min_score > 0, on relit le mail et on
             # decide envoi vs draft selon la note. Sinon : comportement
             # actuel (cfg.mode decide tout).
             effective_mode = cfg.mode
-            if int(getattr(cfg, "autopilot_review_min_score", 0) or 0) > 0:
+            if review_enabled:
+                log({"type": "activity",
+                     "message": f"La 2è IA relit le mail pour {_prospect_label}..."})
                 try:
                     from .quality_reviewer import review_email
                     ctx = (
@@ -787,6 +847,10 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     log(f"  [review] {prospect.name[:30]} : "
                         f"score={review['score']}/10 verdict={review['verdict']} "
                         f"-- {review['comment'][:80]}")
+                    n_reviewed += 1
+                    log({"type": "stage", "id": "review", "state": "running",
+                         "count": n_reviewed,
+                         "message": f"Dernier mail relu : {_prospect_label} (note {review['score']}/10)"})
                     if (review["verdict"] == "draft"
                         or review["score"] < cfg.autopilot_review_min_score):
                         effective_mode = MODE_VALIDATION
@@ -847,6 +911,8 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     body_html = ""
 
             if effective_mode == MODE_AUTO:
+                log({"type": "activity",
+                     "message": f"J'envoie le mail à {_prospect_label}..."})
                 # Envoi direct via SMTP
                 from .outreach.smtp_sender import _load_smtp_config, send_email
                 smtp_cfg = _load_smtp_config()
@@ -866,6 +932,12 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                 prospect.status = "contacted"
                 prospect.last_contact_at = datetime.now().isoformat(timespec="seconds")
                 n_sent += 1
+                log({"type": "stage", "id": "send", "state": "running",
+                     "count": n_sent,
+                     "message": f"Dernier mail envoyé : {_prospect_label}"})
+                log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
+                     "name": _prospect_label, "action": "sent",
+                     "reason": f"envoyé à {prospect.emails[0]}"})
             else:
                 # Mode SAS : on dépose le draft pour validation manuelle
                 prospect.pending_drafts.append({
@@ -880,6 +952,12 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                 })
                 prospect.status = "qualified"  # garde "qualified" tant que pas validé
                 n_pending += 1
+                log({"type": "stage", "id": "send", "state": "running",
+                     "count": n_sent + n_pending,
+                     "message": f"Dernier brouillon posé : {_prospect_label}"})
+                log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
+                     "name": _prospect_label, "action": "draft",
+                     "reason": "mis en brouillon pour validation manuelle"})
             crm._dirty = True  # noqa: SLF001
         except Exception as e:
             log(f"  ⚠ {prospect.name[:30]} : {e}")
@@ -889,6 +967,16 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
 
     crm.save()
     log(f"  → {n_sent} envoyé(s), {n_pending} en attente de validation")
+    log({"type": "stage_done", "id": "write", "count": n_sent + n_pending,
+         "message": f"{n_sent + n_pending} mail(s) rédigé(s)."})
+    if review_enabled:
+        log({"type": "stage_done", "id": "review", "count": n_reviewed,
+             "message": f"{n_reviewed} mail(s) relu(s) par la 2è IA."})
+    else:
+        log({"type": "stage_done", "id": "review", "count": 0,
+             "message": "Relecture désactivée."})
+    log({"type": "stage_done", "id": "send", "count": n_sent + n_pending,
+         "message": f"{n_sent} envoyé(s), {n_pending} en brouillon."})
     return n_sent, n_pending
 
 
