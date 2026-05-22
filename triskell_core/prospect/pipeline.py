@@ -809,13 +809,17 @@ def _run_ai_outreach(
     # glissantes n'est pas atteint. Sinon : envoi mono-adresse.
     raw_pool = list(getattr(cfg, "autopilot_sender_pool", None) or [])
     pool = []
+    # ATTENTION : ne JAMAIS reutiliser le nom `cap` ici -- c'est le plafond
+    # global du run (Cherche-moi N prospects), defini juste au-dessus du
+    # for loop. L'ecraser ici reduisait le respect du "Cherche-moi" a peau
+    # de chagrin (bug constate par Jordan : 2 demande, 7 ecrits).
     for entry in raw_pool:
         if not isinstance(entry, dict):
             continue
         aid = str(entry.get("account_id") or "").strip()
-        cap = int(entry.get("daily_cap") or 0)
-        if aid and cap > 0:
-            pool.append({"account_id": aid, "daily_cap": cap})
+        acc_cap = int(entry.get("daily_cap") or 0)
+        if aid and acc_cap > 0:
+            pool.append({"account_id": aid, "daily_cap": acc_cap})
     use_pool = bool(pool and sender_pool_smtp)
     pool_tracker = None
     pool_counts_24h: dict[str, int] = {}
