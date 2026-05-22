@@ -108,9 +108,17 @@ class OSMAPI:
 
         # Cap dur sur le nombre demandé : Overpass est lent en France entière.
         # Timeout serveur côté Overpass (90s) > timeout réseau côté client (120s).
+        # Match case-insensitive sur le nom de l'area : OSM stocke "Lyon" /
+        # "Île-de-France" / "France" avec leur casse exacte ; l'utilisateur
+        # tape souvent "lyon" en minuscule → sans le flag `,i` Overpass
+        # retourne 0 area, donc 0 POI sans message d'erreur.
+        # On émet aussi `.a out ids;` pour détecter quand l'area est vide
+        # et lever un message explicite (avant : 0 bruts silencieux).
+        area_pattern = self._escape_regex(area)
         ql = (
             f'[out:json][timeout:90];\n'
-            f'area["name"="{self._escape(area)}"]->.a;\n'
+            f'area["name"~"^{area_pattern}$",i]->.a;\n'
+            f'.a out ids;\n'
             f'(\n{filter_lines}\n);\n'
             f'out body {max_results};\n'
         )
@@ -144,11 +152,28 @@ class OSMAPI:
                 f"Début de la réponse : {snippet}"
             )
         elements = data.get("elements", []) or []
+
+        # On a demandé `.a out ids;` en premier : si aucun élément de type
+        # "area" n'est présent dans la réponse, c'est que la zone n'existe
+        # pas dans OSM (faute de frappe, accents oubliés, etc.). Avant
+        # cette détection : 0 POI silencieux et l'utilisateur ne savait pas
+        # pourquoi.
+        has_area = any(e.get("type") == "area" for e in elements)
+        if not has_area:
+            raise RuntimeError(
+                f"OpenStreetMap : zone « {area} » introuvable. "
+                f"Vérifie l'orthographe exacte (avec accents si besoin) "
+                f"— ex : « Lyon », « Île-de-France », « Saint-Étienne »."
+            )
+
         # Dédup par id (les multiples lignes nwr peuvent retourner le même POI
         # plusieurs fois s'il a à la fois contact:email et email).
+        # On filtre aussi le marqueur d'area lui-même renvoyé par `.a out ids;`.
         seen: set[str] = set()
         unique: list[dict] = []
         for e in elements:
+            if e.get("type") == "area":
+                continue
             key = f"{e.get('type')}:{e.get('id')}"
             if key in seen:
                 continue
@@ -174,6 +199,18 @@ class OSMAPI:
     @staticmethod
     def _escape(s: str) -> str:
         return s.replace('"', '').replace('\\', '')
+
+    @staticmethod
+    def _escape_regex(s: str) -> str:
+        # On passe la zone dans une regex Overpass entre ^ et $.
+        # Échappe les guillemets, antislashs, et les méta-caractères regex
+        # qui apparaissent légitimement dans des noms de communes
+        # (parenthèses, points dans les abréviations, traits d'union dans
+        # "Saint-Étienne" — le `-` n'a pas besoin d'échappement hors
+        # crochets, mais on traite tout par sécurité).
+        import re
+        cleaned = s.replace('"', '').replace('\\', '')
+        return re.escape(cleaned)
 
     @staticmethod
     def _has_useful_data(e: dict) -> bool:
