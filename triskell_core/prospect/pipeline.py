@@ -80,8 +80,8 @@ class PipelineConfig:
     enrich_max: int = 100
 
     # IA
-    ai_provider: str = "google"
-    ai_model: str = "gemini-2.5-flash"
+    ai_provider: str = "anthropic"
+    ai_model: str = "claude-sonnet-4-5"
     ai_mega_prompts: list[str] = field(default_factory=lambda: ["01"])  # honnêteté brutale par défaut
     ai_template_brief: str = (
         "Génère un mail de prospection court (≤ 12 lignes), tutoiement chaleureux mais "
@@ -747,8 +747,9 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     model=cfg.ai_model,
                     api_keys=api_keys,
                 )
-                subject = gen.get("subject") or ""
-                body    = gen.get("body") or ""
+                subject  = gen.get("subject") or ""
+                body     = gen.get("body") or ""
+                body_html = gen.get("body_html") or ""
                 _tpl_key = gen.get("template_key") or "auto"
             else:
                 # === Mode classique : generation libre ===
@@ -758,6 +759,7 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     cfg.ai_provider, cfg.ai_model, full, api_keys,
                 )
                 subject, body = _parse_ai_response(response, prospect, cfg)
+                body_html = ""  # genere apres signature (cf. plus bas)
                 _tpl_key = "ai_pipeline"
 
             # === Etape 7 : 2e IA de relecture ===
@@ -813,13 +815,43 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     log(f"  -> plafond {cfg.daily_cap} mails/24h atteint "
                         f"-> brouillon (relance demain)")
 
+            # Signature auto : la boîte expéditrice ajoute sa signature avant
+            # envoi (et avant stockage en draft, pour que la validation montre
+            # bien le mail final). L'IA s'arrête à "Cordialement, {prénom}" ;
+            # la signature complète est collée derrière.
+            try:
+                from triskell_command.integrations.signatures import (
+                    append_signature_to_body,
+                )
+                body = append_signature_to_body(body, account_id="primary")
+            except Exception as _sig_exc:
+                log(f"  [WARN] signature non ajoutée ({_sig_exc})")
+
+            # === Mise en forme HTML legere (Auto-pilote v2) ===
+            # En mode libre, on transforme le texte signe en HTML propre :
+            # wrapper sobre, paragraphes <p>, URLs cliquables. Mode templates :
+            # body_html est deja genere par generate_message_from_templates
+            # (qui respecte le HTML custom du template si present), on ne
+            # le retouche pas.
+            if not use_templates:
+                try:
+                    from triskell_command.integrations.convoy_ai import (
+                        text_to_email_html,
+                    )
+                    body_html = text_to_email_html(
+                        body, sender_name=cfg.sender_mon_prenom or "",
+                    )
+                except Exception as _exc:
+                    logger.debug("text_to_email_html indispo: %s", _exc)
+                    body_html = ""
+
             if effective_mode == MODE_AUTO:
                 # Envoi direct via SMTP
                 from .outreach.smtp_sender import _load_smtp_config, send_email
                 smtp_cfg = _load_smtp_config()
                 msg_id = send_email(
                     smtp_cfg, to=prospect.emails[0],
-                    subject=subject, body=body,
+                    subject=subject, body=body, body_html=body_html,
                 )
                 prospect.history.append({
                     "ts": datetime.now().isoformat(timespec="seconds"),
@@ -840,6 +872,7 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     "kind": "first_contact",
                     "subject": subject,
                     "body": body,
+                    "body_html": body_html,
                     "template_key": _tpl_key,
                     "provider": cfg.ai_provider,
                     "model": cfg.ai_model,
