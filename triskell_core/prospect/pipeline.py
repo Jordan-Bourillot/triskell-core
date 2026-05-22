@@ -986,24 +986,30 @@ def _run_ai_outreach(
                         effective_mode = MODE_VALIDATION
                         log(f"    -> force en brouillon (score insuffisant)")
                     # === Micro-correction appliquee par la 2e IA ===
-                    # Si la 2e IA a suggere une amelioration du corps (champ
-                    # body_revised non vide), on l'applique sur la version
-                    # texte. Le HTML, lui, vient du template original -- on
-                    # le laisse intact pour preserver la mise en forme. Pour
-                    # afficher la version finale aux clients qui n'ont que
-                    # le HTML, on regenere si pas de body_html existant.
+                    # REGLE STRICTE : si le mail vient d'un TEMPLATE deja
+                    # ecrit a la main par Jordan, la 2e IA n'a PAS le droit
+                    # de modifier le corps -- juste de noter. Jordan a dit
+                    # explicitement "n'a pas besoin de reecrire quoi que ce
+                    # soit". Donc body_revised n'est applique que pour les
+                    # mails en generation libre (pas de template).
                     _revised = (review.get("body_revised") or "").strip()
-                    if _revised and _revised != body.strip():
+                    _was_template = bool(use_templates)
+                    _applied = False
+                    if _revised and not _was_template and _revised != body.strip():
                         log(f"    -> 2e IA a propose une micro-modification, appliquee.")
                         body = _revised
-                    # Trace la review dans l'historique du prospect (compteur Relit)
+                        _applied = True
+                    elif _revised and _was_template:
+                        log(f"    -> 2e IA a propose une modif mais on est en mode "
+                            f"TEMPLATE, on n'y touche pas (regle de Jordan).")
+                    # Trace la review dans l'historique du prospect
                     prospect.history.append({
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "kind": "email_reviewed",
                         "score": review["score"],
                         "verdict": review["verdict"],
                         "comment": review["comment"],
-                        "edited": bool(_revised and _revised != body.strip()),
+                        "edited": _applied,
                     })
                 except Exception as exc:
                     log(f"  [WARN] reviewer plante ({exc}) -> on envoie sans relecture")
