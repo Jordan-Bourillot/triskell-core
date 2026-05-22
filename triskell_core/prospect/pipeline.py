@@ -288,7 +288,7 @@ def run_full_pipeline(
             log({"type": "stage_error", "id": "search", "message": str(e)})
     elif not do_search:
         log({"type": "stage_done", "id": "search", "count": 0,
-             "message": "Recherche en mode manuel — aucune nouvelle recherche lancée."})
+             "message": "Cible : prospects existants dans le CRM (aucune nouvelle recherche)."})
 
     # ------------------------------------------------------------------
     # 2) Enrich (rattache au maillon "Cherche" cote UI)
