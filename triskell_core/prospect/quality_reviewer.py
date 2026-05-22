@@ -1,0 +1,129 @@
+"""Quality reviewer — 2e IA qui relit chaque mail avant envoi.
+
+Etape 7 du chantier Auto-pilote v2. Quand l'autopilote vient de generer un
+mail (par IA libre ou pioche template), il l'envoie ici pour relecture.
+La 2e IA renvoie une note sur 10 + un verdict + un commentaire.
+
+Strategie :
+- Meme provider + meme model que la generation (pour ne pas multiplier
+  les cles API). On peut differencier plus tard si besoin.
+- Prompt strict : on demande JSON {score: int 1-10, verdict: 'ok'|'draft',
+  comment: str}. Si la reponse est malformee, on est conservatif (verdict
+  'draft' pour que l'humain relise).
+- Pas de retry : si la 2e IA timeout / plante, on retourne un verdict
+  'draft' avec score=0 -- l'humain aura le dernier mot.
+
+Aucune dependance a triskell-command : reutilise les providers IA de
+triskell_core (ai/providers.py).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+_REVIEW_PROMPT = """\
+Tu es relecteur senior de mails de prospection. Note ce mail sur 10 selon ces \
+criteres :
+
+- Personnalisation (le mail parle vraiment de ce prospect) : 3 pts
+- Clarte de l'offre (le destinataire comprend ce qu'on propose)   : 3 pts
+- Ton naturel, pas de jargon, pas de bullshit                     : 2 pts
+- Pas de variables non remplies type {nom} ou {{ville}}            : 2 pts
+
+REGLES DE VERDICT :
+- score >= 7 -> verdict 'ok' (envoi autorise)
+- score < 7  -> verdict 'draft' (mettre en brouillon pour validation manuelle)
+
+Reponds UNIQUEMENT en JSON, sans markdown, sans commentaire avant ou apres :
+{{
+  "score": <int 1-10>,
+  "verdict": "ok" ou "draft",
+  "comment": "<une phrase qui explique la note>"
+}}
+
+CONTEXTE DU PROSPECT :
+{prospect_context}
+
+OBJET DU MAIL :
+{subject}
+
+CORPS DU MAIL :
+{body}
+"""
+
+
+def review_email(
+    *,
+    subject: str,
+    body: str,
+    prospect_context: str,
+    provider: str,
+    model: str,
+    api_keys: dict[str, str],
+) -> dict[str, Any]:
+    """Demande a la 2e IA de relire et noter le mail.
+
+    Renvoie {score: int, verdict: 'ok'|'draft', comment: str, raw: str}.
+
+    En cas d'erreur de l'IA ou de reponse malformee, renvoie un verdict
+    conservatif ('draft' avec score=0) pour que l'humain ait le dernier mot.
+    """
+    try:
+        from ..ai import providers as ai_providers
+    except ImportError as exc:
+        logger.warning("quality_reviewer: providers IA indisponibles (%s)", exc)
+        return {"score": 0, "verdict": "draft",
+                "comment": "providers IA indisponibles", "raw": ""}
+
+    prompt = _REVIEW_PROMPT.format(
+        prospect_context=(prospect_context or "(aucun contexte)").strip()[:600],
+        subject=(subject or "(sans objet)").strip()[:200],
+        body=(body or "").strip()[:3000],
+    )
+
+    raw = ""
+    try:
+        raw = ai_providers.send_to_provider(provider, model, prompt, api_keys) or ""
+    except Exception as exc:
+        logger.warning("quality_reviewer: appel IA a echoue (%s)", exc)
+        return {"score": 0, "verdict": "draft",
+                "comment": f"reviewer plante : {exc}", "raw": raw}
+
+    return _parse_review(raw)
+
+
+def _parse_review(raw: str) -> dict[str, Any]:
+    """Extrait {score, verdict, comment} d'une reponse IA tolerante."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {"score": 0, "verdict": "draft",
+                "comment": "reviewer vide", "raw": ""}
+    # Vire d'eventuels backticks markdown autour du JSON
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw,
+                     flags=re.IGNORECASE | re.MULTILINE).strip()
+    # Cherche le 1er objet JSON dans la reponse (au cas ou l'IA radote avant)
+    m = re.search(r"\{[\s\S]*?\}", cleaned)
+    if not m:
+        return {"score": 0, "verdict": "draft",
+                "comment": "reviewer reponse non-JSON", "raw": raw}
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError as exc:
+        return {"score": 0, "verdict": "draft",
+                "comment": f"reviewer JSON invalide : {exc}", "raw": raw}
+    try:
+        score = int(data.get("score", 0))
+    except Exception:
+        score = 0
+    score = max(0, min(10, score))
+    verdict = str(data.get("verdict") or "").lower().strip()
+    if verdict not in ("ok", "draft"):
+        # Conservatif : si verdict pas explicite, on se base sur le score
+        verdict = "ok" if score >= 7 else "draft"
+    comment = str(data.get("comment") or "").strip()[:300]
+    return {"score": score, "verdict": verdict, "comment": comment, "raw": raw}

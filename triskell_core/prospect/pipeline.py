@@ -100,6 +100,24 @@ class PipelineConfig:
     daily_cap: int = 40
     follow_up_days: int = 5
 
+    # Auto-pilote v2 : combien de prospects vises par run nocturne. Utilise
+    # par le UI tableau de commande pour afficher / piloter le volume cible.
+    nightly_target: int = 50
+
+    # Auto-pilote v2 : quel produit on pousse cette nuit. Si rempli, le
+    # pipeline pioche dans les templates de prospection de ce produit
+    # (table triskell_email_templates, category='prospection') au lieu
+    # de generer le mail from scratch. Vide -> ancien comportement (IA libre).
+    autopilot_product: str = ""
+
+    # Auto-pilote v2 : audience visee pour le matching de template.
+    # "" = peu importe, "creator" = createurs/influenceurs, "pro" = B2B local.
+    autopilot_audience: str = ""
+
+    # Auto-pilote v2 : seuil minimal de note de la 2e IA pour autoriser
+    # l'envoi direct (sinon brouillon). 0 = pas de relecture.
+    autopilot_review_min_score: int = 7
+
     @classmethod
     def load(cls) -> "PipelineConfig":
         if not PIPELINE_CONFIG_FILE.exists():
@@ -550,9 +568,40 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
         log(f"  ⚠ Clé API '{cfg.ai_provider}' manquante — étape AI skippée")
         return (0, 0)
 
-    # Charge méga-prompts sélectionnés
-    library = load_packaged_library()
-    selected_megas = [mp for mp in library if mp.get("id") in cfg.ai_mega_prompts]
+    # === Mode "pioche dans templates" (Auto-pilote v2, etape 6) ===
+    # Si cfg.autopilot_product est rempli, on tente d'utiliser les templates
+    # de prospection deja prets (table triskell_email_templates) au lieu de
+    # la generation libre. Si l'import echoue ou aucun template n'est dispo,
+    # fallback automatique sur la generation libre.
+    templates_for_picking: list[dict] = []
+    use_templates = bool((cfg.autopilot_product or "").strip())
+    if use_templates:
+        try:
+            from triskell_command.integrations.prospection_templates import (
+                list_prospection_templates,
+            )
+            templates_for_picking = list_prospection_templates(
+                product=cfg.autopilot_product.strip(),
+                audience=(cfg.autopilot_audience or "").strip() or None,
+            ) or []
+            log(f"  -> mode templates : {len(templates_for_picking)} template(s) "
+                f"trouve(s) pour produit '{cfg.autopilot_product}'")
+            if not templates_for_picking:
+                use_templates = False
+                log("  [WARN] aucun template pour ce produit -> fallback IA libre")
+        except ImportError as exc:
+            use_templates = False
+            log(f"  [WARN] mode templates indisponible ({exc}) -> fallback IA libre")
+        except Exception as exc:
+            use_templates = False
+            log(f"  [WARN] chargement templates a plante ({exc}) -> fallback IA libre")
+
+    # Charge méga-prompts seulement si mode libre
+    if not use_templates:
+        library = load_packaged_library()
+        selected_megas = [mp for mp in library if mp.get("id") in cfg.ai_mega_prompts]
+    else:
+        selected_megas = []  # pas utilise en mode templates
 
     crm = CRM()
     eligible = [
@@ -574,14 +623,84 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
     n_pending = 0
     for i, prospect in enumerate(eligible[:cap], 1):
         try:
-            user_prompt = _build_personalized_prompt(prospect, cfg)
-            full = build_ultimate_prompt(user_prompt, selected_megas)
-            response = ai_providers.send_to_provider(
-                cfg.ai_provider, cfg.ai_model, full, api_keys,
-            )
-            subject, body = _parse_ai_response(response, prospect, cfg)
+            if use_templates:
+                # === Mode templates : pioche le bon modele puis adapte ===
+                from triskell_command.integrations.convoy_ai import (
+                    generate_message_from_templates,
+                )
+                prospect_dict = {
+                    "raison_sociale": prospect.name or prospect.legal_name or "",
+                    "prenom":         "",
+                    "nom":            "",
+                    "email":          prospect.emails[0] if prospect.emails else "",
+                    "ville":          prospect.city or "",
+                    "code_postal":    prospect.postal_code or "",
+                    "secteur":        prospect.industry or "",
+                    "notes":          (prospect.description or "")[:300],
+                }
+                gen = generate_message_from_templates(
+                    prospect_dict,
+                    templates=templates_for_picking,
+                    template_product=cfg.autopilot_product.strip(),
+                    sender_name=cfg.sender_mon_prenom or "",
+                    user_brief=cfg.ai_template_brief or "",
+                    provider=cfg.ai_provider,
+                    model=cfg.ai_model,
+                    api_keys=api_keys,
+                )
+                subject = gen.get("subject") or ""
+                body    = gen.get("body") or ""
+                _tpl_key = gen.get("template_key") or "auto"
+            else:
+                # === Mode classique : generation libre ===
+                user_prompt = _build_personalized_prompt(prospect, cfg)
+                full = build_ultimate_prompt(user_prompt, selected_megas)
+                response = ai_providers.send_to_provider(
+                    cfg.ai_provider, cfg.ai_model, full, api_keys,
+                )
+                subject, body = _parse_ai_response(response, prospect, cfg)
+                _tpl_key = "ai_pipeline"
 
-            if cfg.mode == MODE_AUTO:
+            # === Etape 7 : 2e IA de relecture ===
+            # Si autopilot_review_min_score > 0, on relit le mail et on
+            # decide envoi vs draft selon la note. Sinon : comportement
+            # actuel (cfg.mode decide tout).
+            effective_mode = cfg.mode
+            if int(getattr(cfg, "autopilot_review_min_score", 0) or 0) > 0:
+                try:
+                    from .quality_reviewer import review_email
+                    ctx = (
+                        f"Nom: {prospect.name or prospect.legal_name or '?'}\n"
+                        f"Ville: {prospect.city or '?'}\n"
+                        f"Secteur: {prospect.industry or '?'}\n"
+                        f"Description: {(prospect.description or '')[:200]}"
+                    )
+                    review = review_email(
+                        subject=subject, body=body,
+                        prospect_context=ctx,
+                        provider=cfg.ai_provider,
+                        model=cfg.ai_model,
+                        api_keys=api_keys,
+                    )
+                    log(f"  [review] {prospect.name[:30]} : "
+                        f"score={review['score']}/10 verdict={review['verdict']} "
+                        f"-- {review['comment'][:80]}")
+                    if (review["verdict"] == "draft"
+                        or review["score"] < cfg.autopilot_review_min_score):
+                        effective_mode = MODE_VALIDATION
+                        log(f"    -> force en brouillon (score insuffisant)")
+                    # Trace la review dans l'historique du prospect (compteur Relit)
+                    prospect.history.append({
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "kind": "email_reviewed",
+                        "score": review["score"],
+                        "verdict": review["verdict"],
+                        "comment": review["comment"],
+                    })
+                except Exception as exc:
+                    log(f"  [WARN] reviewer plante ({exc}) -> on envoie sans relecture")
+
+            if effective_mode == MODE_AUTO:
                 # Envoi direct via SMTP
                 from .outreach.smtp_sender import _load_smtp_config, send_email
                 smtp_cfg = _load_smtp_config()
@@ -594,7 +713,7 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     "kind": "email_sent",
                     "to": prospect.emails[0],
                     "subject": subject,
-                    "template_key": "ai_pipeline",
+                    "template_key": _tpl_key,
                     "message_id": msg_id,
                     "generated_by": f"{cfg.ai_provider}/{cfg.ai_model}",
                 })
@@ -608,7 +727,7 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
                     "kind": "first_contact",
                     "subject": subject,
                     "body": body,
-                    "template_key": "ai_pipeline",
+                    "template_key": _tpl_key,
                     "provider": cfg.ai_provider,
                     "model": cfg.ai_model,
                 })
