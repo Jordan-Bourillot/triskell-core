@@ -84,12 +84,13 @@ class PipelineConfig:
     ai_model: str = "claude-sonnet-4-5"
     ai_mega_prompts: list[str] = field(default_factory=lambda: ["01"])  # honnêteté brutale par défaut
     ai_template_brief: str = (
-        "Génère un mail de prospection court (≤ 12 lignes), tutoiement chaleureux mais "
-        "professionnel. L'objet doit être personnalisé avec le nom de l'entreprise. "
-        "Pas de bullshit, pas de jargon, pas d'emojis. Format strict :\n"
+        "Génère un mail de prospection court (≤ 12 lignes). "
+        "L'objet doit être personnalisé avec le nom de l'entreprise. "
+        "Pas de bullshit, pas de jargon, pas d'emojis, pas d'expressions familières "
+        "type 'A tout' / 'Bisous' / 'A+'. Format strict :\n"
         "OBJET : <objet>\n\n"
         "<corps du mail>\n\n"
-        "Cordialement,\n{mon_prenom}"
+        "<formule de fin adaptée au ton>,\n{mon_prenom}"
     )
 
     # Sender
@@ -891,6 +892,28 @@ def _run_ai_outreach(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[i
     return n_sent, n_pending
 
 
+def _detect_audience(prospect: Prospect, cfg: PipelineConfig) -> str:
+    """Renvoie 'creator' ou 'pro' selon la source du prospect ou l'override
+    explicite dans la config.
+
+    Regle : si le prospect vient d'Obelisk (createurs reseaux sociaux), c'est
+    un createur -> tutoiement chaleureux. Sinon (Chasseur, Sirene, Maps,
+    Eclaireur), c'est une entreprise pro -> vouvoiement professionnel.
+    L'override `cfg.autopilot_audience` ('creator'/'pro') prime si renseigne.
+    """
+    override = (getattr(cfg, "autopilot_audience", "") or "").strip().lower()
+    if override in ("creator", "pro"):
+        return override
+    source_names = {(s.name or "").lower() for s in (prospect.sources or [])}
+    creator_markers = {"obelisk", "obelisk_youtube", "obelisk_tiktok",
+                       "obelisk_instagram", "obelisk_twitch", "obelisk_reddit",
+                       "obelisk_bluesky", "obelisk_github"}
+    for name in source_names:
+        if name in creator_markers or name.startswith("obelisk"):
+            return "creator"
+    return "pro"
+
+
 def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
     """Construit la consigne user pour l'IA, contextualisée sur le prospect."""
     name = prospect.name or prospect.legal_name or "(sans nom)"
@@ -899,6 +922,38 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
     industry = prospect.industry or "—"
     description = prospect.description or "—"
 
+    audience = _detect_audience(prospect, cfg)
+    if audience == "creator":
+        ton_instruction = (
+            "TON ET FORMULATION : ce prospect est un créateur / influenceur. "
+            "TUTOIEMENT autorisé MAIS SANS familiarité -- on ne connaît pas "
+            "ce prospect personnellement. Reste poli et respectueux. "
+            "Salutation : 'Bonjour <prénom>,' (ou 'Salut <prénom>,' si vraiment "
+            "le ton de la chaîne s'y prête, sinon Bonjour). "
+            "Formule de fin obligatoire : 'Cordialement', 'Belle journée' ou "
+            "'À bientôt'. STRICTEMENT INTERDIT : 'Bien à toi', 'Bisous', "
+            "'À tout' ', 'A+', surnoms, blagues, complicité forcée."
+        )
+    else:
+        ton_instruction = (
+            "TON ET FORMULATION : ce prospect est une ENTREPRISE professionnelle. "
+            "VOUVOIEMENT obligatoire et systématique ('Bonjour,', 'vous', 'votre'). "
+            "JAMAIS de tutoiement, même chaleureux. "
+            "Formule de fin : 'Cordialement', 'Bien cordialement'. "
+            "STRICTEMENT INTERDIT toute familiarité."
+        )
+
+    mise_en_forme = (
+        "MISE EN FORME : tu peux utiliser un peu de gras et de soulignement "
+        "pour faire ressortir les points importants (prix, délai, "
+        "argument-clé). Syntaxe :\n"
+        "  - **mot ou phrase courte** pour le GRAS\n"
+        "  - __mot ou phrase courte__ pour le SOULIGNEMENT\n"
+        "Maximum 3 passages en gras et 2 en souligné par mail. Reste sobre, "
+        "ne décore pas, n'abuse pas. Aucun emoji, aucune liste à puces, "
+        "aucun titre."
+    )
+
     return (
         f"Tu vas rédiger un mail de prospection commercial pour ce prospect précis :\n\n"
         f"PROSPECT :\n"
@@ -906,8 +961,11 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
         f"- Ville : {city}\n"
         f"- Secteur : {industry}\n"
         f"- Description : {description[:300]}\n"
-        f"- Site web : {prospect.website or '—'}\n\n"
+        f"- Site web : {prospect.website or '—'}\n"
+        f"- Type : {'créateur / influenceur' if audience == 'creator' else 'entreprise pro'}\n\n"
         f"MON PRÉNOM : {cfg.sender_mon_prenom or '(non renseigné)'}\n\n"
+        f"{ton_instruction}\n\n"
+        f"{mise_en_forme}\n\n"
         f"CONSIGNES :\n{cfg.ai_template_brief}\n"
     )
 
