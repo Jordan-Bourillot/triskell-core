@@ -131,6 +131,12 @@ class PipelineConfig:
     send_hour_start: int = 8
     send_hour_end:   int = 19
 
+    # Auto-pilote v2 : delai en secondes a observer entre 2 envois successifs.
+    # Sert a etaler la cadence (anti-detection spam, reputation IONOS, etc.).
+    # 0 = pas de delai (comportement historique). S'applique aussi a l'envoi
+    # groupe manuel depuis l'onglet Brouillons.
+    send_delay_seconds: int = 0
+
     # Auto-pilote v2 : heure de declenchement du run nocturne (Europe/Paris).
     # Le runner verifie toutes les 5 min ; quand on est dans la fenetre
     # [nightly_hour, nightly_hour+1[ ET qu'on n'a pas deja run aujourd'hui,
@@ -1218,6 +1224,13 @@ def _run_ai_outreach(
                      "name": _prospect_label, "action": "sent",
                      "reason": f"envoyé à {prospect.emails[0]}"
                                + (f" depuis {sender_account_id}" if use_pool else "")})
+                # Delai anti-cadence entre 2 envois reussis : etale la
+                # cadence pour proteger la reputation des boites mail
+                # (anti-flag spam). 0 = pas de delai (legacy).
+                _delay = int(getattr(cfg, "send_delay_seconds", 0) or 0)
+                if _delay > 0:
+                    import time as _time
+                    _time.sleep(_delay)
             else:
                 # Mode SAS : on dépose le draft pour validation manuelle
                 _draft_payload = {
