@@ -247,6 +247,17 @@ def _row_to_prospect(row: dict[str, str], mapping: dict[str, str],
         name=name,
         legal_name=legal_name,
         emails=emails,
+        emails_meta=[
+            {
+                "email": e,
+                "source": "file",
+                "source_id": source_label,
+                "url": "",
+                "context": f"importé du fichier « {source_label} »",
+                "found_at": "",
+            }
+            for e in emails if e
+        ],
         phones=phones,
         website=website,
         address=get("address"),

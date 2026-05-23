@@ -620,7 +620,21 @@ def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[in
             gained_phones = [p_ for p_ in data["phones"]
                              if p_ not in prospect.phones]
             if gained_emails:
-                prospect.emails = (prospect.emails + gained_emails)[:8]
+                # On tag la provenance : "web" (ou "linktree" si hub agrégateur),
+                # avec l'URL du site visité comme contexte. Ça permet à l'IA
+                # de comprendre que cet email vient de la page contact /
+                # mentions légales du site officiel.
+                src_name = "linktree" if is_hub(url) else "web"
+                ctx = ("hub Linktree / Beacons / etc." if src_name == "linktree"
+                        else "page contact ou mentions légales du site officiel")
+                for e in gained_emails:
+                    prospect.add_email(e, source=src_name, url=url, context=ctx)
+                # Garde la limite à 8 emails (sécurité historique)
+                if len(prospect.emails) > 8:
+                    keep = set(prospect.emails[:8])
+                    prospect.emails = prospect.emails[:8]
+                    prospect.emails_meta = [m for m in prospect.emails_meta
+                                             if m.get("email") in keep]
                 n_emails += len(gained_emails)
             if gained_phones:
                 prospect.phones = (prospect.phones + gained_phones)[:5]
@@ -1216,6 +1230,46 @@ def _detect_audience(prospect: Prospect, cfg: PipelineConfig) -> str:
     return "pro"
 
 
+def _humanize_email_source(source: str, context: str = "") -> str:
+    """Traduit une source technique en libellé humain pour le brief IA."""
+    s = (source or "").lower()
+    if context:
+        return context  # le contexte stocké est déjà rédigé pour un humain
+    mapping = {
+        "web":            "page contact ou mentions légales du site officiel",
+        "web_inferred":   "adresse devinée à partir du domaine du site (non vérifiée)",
+        "sirene":         "annuaire d'entreprises SIRENE",
+        "maps":           "fiche Google Maps de l'établissement",
+        "file":           "fichier importé",
+        "linktree":       "hub de liens (Linktree, Beacons, etc.)",
+        "obelisk":        "profil créateur récupéré via Obélisk",
+        "phantombuster":  "profil social récupéré via PhantomBuster",
+        "chasseur":       "trouvé via Le Chasseur (entreprises)",
+        "bio":            "bio / description du profil",
+    }
+    if s in mapping:
+        return mapping[s]
+    # Cas obelisk_youtube, obelisk_twitch, phantombuster_instagram, etc.
+    if s.startswith("obelisk_"):
+        return f"profil {s.split('_', 1)[1]} (récupéré via Obélisk)"
+    if s.startswith("phantombuster_"):
+        return f"profil {s.split('_', 1)[1]} (récupéré via PhantomBuster)"
+    return source or "source inconnue"
+
+
+def _humanize_prospect_sources(prospect: Prospect) -> list[str]:
+    """Liste des origines globales du prospect, en libellés humains."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in (prospect.sources or []):
+        name = (getattr(s, "name", "") or "").lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(_humanize_email_source(name))
+    return out
+
+
 def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
     """Construit la consigne user pour l'IA, contextualisée sur le prospect."""
     name = prospect.name or prospect.legal_name or "(sans nom)"
@@ -1227,7 +1281,7 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
     # Branche tutoiement (createurs / influenceurs) retiree a la demande de
     # Jordan : il ne veut PLUS jamais d'instructions de tutoiement dans le
     # prompt, peu importe le type de prospect. Tout le monde est vouvoye.
-    audience = _detect_audience(prospect, cfg)  # garde pour la trace, plus utilise
+    audience = _detect_audience(prospect, cfg)
     ton_instruction = (
         "TON ET FORMULATION : VOUVOIEMENT obligatoire et systematique "
         "('Bonjour,', 'vous', 'votre'). JAMAIS de tutoiement, jamais. "
@@ -1248,6 +1302,53 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
         "aucun titre."
     )
 
+    # === ORIGINE DU PROSPECT + DE SON EMAIL ===
+    # On expose à l'IA d'où vient le prospect (Google Maps, YouTube, SIRENE…)
+    # et d'où vient SPÉCIFIQUEMENT l'adresse mail choisie (page contact d'un
+    # site officiel, bio YouTube, mentions légales…). Ces infos changent
+    # l'angle commercial : un coiffeur trouvé sur Maps n'est pas abordé comme
+    # un YouTubeur, et un email pris en mentions légales n'a pas la même
+    # connotation qu'un email mis en avant sur une page contact.
+    chosen_email = prospect.emails[0] if prospect.emails else ""
+    email_origin_human = ""
+    if chosen_email:
+        meta = prospect.source_of_email(chosen_email)
+        if meta:
+            email_origin_human = _humanize_email_source(
+                meta.get("source", ""), meta.get("context", "")
+            )
+    prospect_origins = _humanize_prospect_sources(prospect)
+    audience_human = ("Pro / Entreprise" if audience == "pro"
+                       else "Créateur / Influenceur" if audience == "creator"
+                       else "Inconnue")
+    subs_line = ""
+    if prospect.subscribers and audience == "creator":
+        subs_line = f"- Audience (abonnés / followers) : {prospect.subscribers:,}\n".replace(",", " ")
+
+    contexte_origine = "CONTEXTE D'ACQUISITION DU PROSPECT :\n"
+    contexte_origine += f"- Type de prospect : {audience_human}\n"
+    if prospect_origins:
+        contexte_origine += "- D'où le prospect a été trouvé : " + ", ".join(prospect_origins) + "\n"
+    if chosen_email and email_origin_human:
+        contexte_origine += (
+            f"- D'où vient l'adresse mail que tu vas écrire ({chosen_email}) : "
+            f"{email_origin_human}\n"
+        )
+    if subs_line:
+        contexte_origine += subs_line
+    contexte_origine += (
+        "\nADAPTE ton angle commercial à ce contexte. Exemples :\n"
+        "  • Si l'adresse vient des « mentions légales » d'un site pro, c'est "
+        "  un contact officiel B2B : reste très pro, parle entreprise.\n"
+        "  • Si l'adresse vient d'une « page contact » : c'est le bon canal "
+        "  pour une approche commerciale directe.\n"
+        "  • Si c'est un créateur (YouTube, Twitch…) avec adresse en bio : "
+        "  reste pro mais reconnais leur statut de créateur ; pas de jargon "
+        "  d'entreprise lourd.\n"
+        "  • Si c'est un commerce local (Google Maps) : parle de leur métier "
+        "  de proximité, pas de « scaling » ni de « ROI »."
+    )
+
     return (
         f"Tu vas rédiger un mail de prospection commercial pour ce prospect précis :\n\n"
         f"PROSPECT :\n"
@@ -1256,6 +1357,7 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
         f"- Secteur : {industry}\n"
         f"- Description : {description[:300]}\n"
         f"- Site web : {prospect.website or '—'}\n\n"
+        f"{contexte_origine}\n\n"
         f"MON PRÉNOM : {cfg.sender_mon_prenom or '(non renseigné)'}\n\n"
         f"{ton_instruction}\n\n"
         f"{mise_en_forme}\n\n"

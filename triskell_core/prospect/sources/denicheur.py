@@ -49,10 +49,34 @@ def _convert(raw: dict) -> Prospect:
     # On ne préempte pas le website ici : la détection commerciale du Dénicheur
     # mélange plein de patterns. On reposera la question lors de l'enrichissement.
 
+    emails_list = list(raw.get("emails") or [])
+    # Si le pipeline d'enrichissement a déjà tagué la source de chaque
+    # email (web / linktree / etc.), on la respecte. Sinon : source par
+    # défaut = la plateforme du créateur (bio profil).
+    raw_meta = raw.get("emails_meta")
+    if isinstance(raw_meta, list) and raw_meta:
+        emails_meta_list = [
+            m for m in raw_meta
+            if isinstance(m, dict) and m.get("email")
+        ]
+    else:
+        emails_meta_list = [
+            {
+                "email": e,
+                "source": f"obelisk_{platform}" if platform else "obelisk",
+                "source_id": str(raw.get("id", "") or ""),
+                "url": raw.get("url", "") or "",
+                "context": (f"bio / profil {platform}" if platform
+                            else "profil créateur"),
+                "found_at": raw.get("found_at") or "",
+            }
+            for e in emails_list if e
+        ]
     p = Prospect(
         name=raw.get("name", "") or "",
         handle=raw.get("handle", "") or "",
-        emails=list(raw.get("emails") or []),
+        emails=emails_list,
+        emails_meta=emails_meta_list,
         phones=list(raw.get("phones") or []),
         website=website,
         other_urls=other_urls,

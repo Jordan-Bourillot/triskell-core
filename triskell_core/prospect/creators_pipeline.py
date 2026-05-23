@@ -460,12 +460,33 @@ def run_creators_pipeline(
                 scraped = filter_emails(list(data.get("emails") or []))
                 if scraped:
                     p["emails"] = scraped[:3]
+                    # Tag la provenance : ces emails viennent du site web
+                    # lié dans la bio (pas du profil créateur lui-même).
+                    src_label = "linktree" if is_hub(url) else "web"
+                    ctx_label = ("hub Linktree / Beacons / etc."
+                                  if src_label == "linktree"
+                                  else "page contact ou mentions légales du site officiel")
+                    p["emails_meta"] = [
+                        {"email": e, "source": src_label, "source_id": "",
+                         "url": url, "context": ctx_label, "found_at": ""}
+                        for e in scraped[:3]
+                    ]
                     n_enriched += 1
                 else:
                     inferred = _infer_standard_emails(url)
                     if inferred:
                         p["emails"] = inferred
                         p["emails_inferred"] = True
+                        # Email "inféré" = deviné depuis le domaine (contact@<site>).
+                        # Source = "web_inferred" pour que l'IA sache que
+                        # l'adresse n'a pas été VUE sur la page, juste devinée.
+                        p["emails_meta"] = [
+                            {"email": e, "source": "web_inferred", "source_id": "",
+                             "url": url,
+                             "context": "adresse devinée à partir du domaine du site",
+                             "found_at": ""}
+                            for e in inferred
+                        ]
                         n_inferred += 1
                 if data.get("phones"):
                     p["phones"] = list(data["phones"])[:3]

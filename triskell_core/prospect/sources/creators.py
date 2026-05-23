@@ -187,10 +187,23 @@ def _from_raw(raw: dict) -> Prospect | None:
     monetization = detect_monetization(desc)
     contacts = extract_contacts(desc)
     platform = raw.get("platform", "")
+    emails_list = list(contacts["emails"])
     return Prospect(
         name=raw.get("name", "") or "",
         handle=raw.get("handle", "") or "",
-        emails=list(contacts["emails"]),
+        emails=emails_list,
+        emails_meta=[
+            {
+                "email": e,
+                "source": f"obelisk_{platform}" if platform else "obelisk",
+                "source_id": str(raw.get("id", "") or ""),
+                "url": raw.get("url", "") or "",
+                "context": (f"bio / description {platform}" if platform
+                            else "description du créateur"),
+                "found_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            for e in emails_list if e
+        ],
         phones=list(contacts["phones"]),
         other_urls=list(monetization.get("urls", []))[:8],
         country=raw.get("country", "") or "",

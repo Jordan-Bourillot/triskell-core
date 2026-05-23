@@ -87,6 +87,21 @@ class Prospect:
 
     # Contact
     emails: list[str] = field(default_factory=list)
+    # Métadonnées par email : d'où vient CHAQUE adresse (page contact du site,
+    # mentions légales, profil YouTube, fiche Google Maps, etc.). Une entrée
+    # par email connu. Schéma de chaque dict :
+    #   {
+    #     "email": str,        # l'adresse telle quelle (clé de jointure)
+    #     "source": str,       # nom de la source qui l'a trouvée
+    #                          # ("web", "obelisk", "maps", "sirene", "file"…)
+    #     "source_id": str,    # optionnel : ID natif (URL page, channel_id…)
+    #     "url": str,          # optionnel : URL d'origine si pertinent
+    #     "context": str,      # libellé humain ("page mentions légales"…)
+    #     "found_at": str,     # ISO timestamp
+    #   }
+    # Peut être plus court que `emails` (entrées legacy sans meta) — dans ce
+    # cas, le code applicatif retombe sur la source globale du prospect.
+    emails_meta: list[dict[str, str]] = field(default_factory=list)
     phones: list[str] = field(default_factory=list)
     website: str = ""
     other_urls: list[str] = field(default_factory=list)
@@ -150,11 +165,74 @@ class Prospect:
                 keys.append(f"src:{s.name}:{s.source_id}")
         return keys
 
+    # ---------- Emails : ajout avec source ----------
+    def add_email(self, email: str, *, source: str = "",
+                  source_id: str = "", url: str = "",
+                  context: str = "", found_at: str = "") -> bool:
+        """Ajoute un email + déclare sa provenance.
+
+        Idempotent : si l'email est déjà connu, on enrichit la meta existante
+        (on ne crée pas de doublon). Renvoie True si l'email était nouveau.
+        """
+        ne = norm_email(email)
+        if not ne:
+            return False
+        ts = found_at or datetime.now().isoformat(timespec="seconds")
+        meta_entry = {
+            "email": email.strip(),
+            "source": (source or "").strip().lower(),
+            "source_id": (source_id or "").strip(),
+            "url": (url or "").strip(),
+            "context": (context or "").strip(),
+            "found_at": ts,
+        }
+        # Email déjà connu ? On enrichit la meta si elle n'a pas déjà de source.
+        existing_idx = -1
+        for i, e in enumerate(self.emails):
+            if norm_email(e) == ne:
+                existing_idx = i
+                break
+        if existing_idx >= 0:
+            # Cherche une meta existante pour cet email
+            for m in self.emails_meta:
+                if norm_email(m.get("email", "")) == ne:
+                    # On ne remplace pas une source déjà renseignée — la
+                    # première source qui a trouvé l'email garde le crédit.
+                    if not (m.get("source") or "").strip():
+                        m.update(meta_entry)
+                    return False
+            # Meta absente pour cet email connu : on l'ajoute
+            self.emails_meta.append(meta_entry)
+            return False
+        # Nouvel email : on l'ajoute aux 2 listes
+        self.emails.append(email.strip())
+        self.emails_meta.append(meta_entry)
+        return True
+
+    def source_of_email(self, email: str) -> dict | None:
+        """Retourne la meta de provenance d'un email, ou None si inconnue."""
+        ne = norm_email(email)
+        if not ne:
+            return None
+        for m in self.emails_meta:
+            if norm_email(m.get("email", "")) == ne:
+                return dict(m)
+        return None
+
     # ---------- Merge ----------
     def merge(self, other: "Prospect") -> "Prospect":
         """Fusionne `other` dans self. Modifie self en place et le renvoie."""
         # Listes : union ordonnée
         self.emails = _merge_list(self.emails, other.emails, key=norm_email)
+        # emails_meta : union par email normalisé ; conserve la 1ère source
+        seen_meta = {norm_email(m.get("email", ""))
+                     for m in self.emails_meta
+                     if norm_email(m.get("email", ""))}
+        for m in (other.emails_meta or []):
+            ne = norm_email(m.get("email", ""))
+            if ne and ne not in seen_meta:
+                self.emails_meta.append(dict(m))
+                seen_meta.add(ne)
         self.phones = _merge_list(self.phones, other.phones, key=norm_phone)
         self.other_urls = _merge_list(self.other_urls, other.other_urls, key=norm_website)
         self.tags = _merge_list(self.tags, other.tags)
@@ -204,6 +282,21 @@ class Prospect:
         sources = [Source(**s) for s in d.get("sources", [])]
         d2 = dict(d)
         d2["sources"] = sources
+        # emails_meta : sanitize en list[dict] (tolère les formats anciens)
+        raw_meta = d.get("emails_meta") or []
+        clean_meta: list[dict] = []
+        if isinstance(raw_meta, list):
+            for m in raw_meta:
+                if isinstance(m, dict) and m.get("email"):
+                    clean_meta.append({
+                        "email":     str(m.get("email") or ""),
+                        "source":    str(m.get("source") or "").lower(),
+                        "source_id": str(m.get("source_id") or ""),
+                        "url":       str(m.get("url") or ""),
+                        "context":   str(m.get("context") or ""),
+                        "found_at":  str(m.get("found_at") or ""),
+                    })
+        d2["emails_meta"] = clean_meta
         # tolérance aux champs absents
         valid = {f for f in cls.__dataclass_fields__}
         d2 = {k: v for k, v in d2.items() if k in valid}

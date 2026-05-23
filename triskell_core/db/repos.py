@@ -39,6 +39,7 @@ def prospect_to_row(p: Prospect) -> dict[str, Any]:
         "legal_name": p.legal_name or "",
         "siren": p.siren or "",
         "emails": list(p.emails or []),
+        "emails_meta": list(p.emails_meta or []),
         "phones": list(p.phones or []),
         "website": p.website or "",
         "other_urls": list(p.other_urls or []),
@@ -73,6 +74,11 @@ def row_to_prospect(row: dict[str, Any]) -> Prospect:
     p.legal_name = row.get("legal_name") or ""
     p.siren = row.get("siren") or ""
     p.emails = list(row.get("emails") or [])
+    # emails_meta peut être absent (anciens prospects) — on tolère.
+    raw_meta = row.get("emails_meta") or []
+    if isinstance(raw_meta, list):
+        p.emails_meta = [m for m in raw_meta
+                          if isinstance(m, dict) and m.get("email")]
     p.phones = list(row.get("phones") or [])
     p.website = row.get("website") or ""
     p.other_urls = list(row.get("other_urls") or [])
