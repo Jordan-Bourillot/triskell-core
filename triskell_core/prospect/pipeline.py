@@ -705,8 +705,19 @@ def _run_ai_outreach(
     if templates_override:
         templates_for_picking = list(templates_override)
         use_templates = True
+        # Diagnostic round-robin : si Jordan voit toujours le meme template
+        # alors qu'il en a plusieurs, c'est souvent que ses templates ne
+        # sont pas tous tagues a la bonne audience. On affiche le compte
+        # par audience pour qu'il sache d'un coup d'oeil ce que l'autopilote
+        # va trouver pour ses prospects (creator vs pro).
+        _by_aud: dict[str, int] = {}
+        for _t in templates_for_picking:
+            _a = (_t.get("audience") or "creator").lower()
+            _by_aud[_a] = _by_aud.get(_a, 0) + 1
+        _aud_summary = ", ".join(f"{k}={v}" for k, v in sorted(_by_aud.items()))
         log(f"  -> mode templates (override catalogue) : "
-            f"{len(templates_for_picking)} template(s) charge(s).")
+            f"{len(templates_for_picking)} template(s) charge(s) "
+            f"[{_aud_summary or 'audience non taguee'}].")
     elif (cfg.autopilot_product or "").strip():
         try:
             from triskell_command.integrations.prospection_templates import (
@@ -987,6 +998,21 @@ def _run_ai_outreach(
                 body_html = ""  # genere apres signature (cf. plus bas)
                 _tpl_key = "ai_pipeline"
 
+            # === Garde-fou anti-placeholder oublie (regle absolue Jordan) ===
+            # Si un {variable} ou {{variable}} traine dans le sujet ou le
+            # corps (substitution incomplete, template casse, IA qui a
+            # ajoute son propre placeholder), le mail ne doit PAS partir.
+            # On jette le mail et on saute le prospect ce run.
+            _orphan = _has_unfilled_placeholder(subject, body)
+            if _orphan:
+                log(f"  [skip] {prospect.name[:30]} : placeholder oublie "
+                    f"'{_orphan}' dans le mail -> jete, prospect non "
+                    f"contacte ce run (regle anti-placeholder)")
+                log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
+                     "name": _prospect_label, "action": "skipped",
+                     "reason": f"placeholder oublie : {_orphan}"})
+                continue
+
             # === Detection refus IA ===
             # Si l'IA a refuse d'ecrire et a dump sa meta-analyse a la place
             # ("PROBLEME MAJEUR", "Je ne peux pas rediger", "impossible de
@@ -1010,6 +1036,11 @@ def _run_ai_outreach(
             # decide envoi vs draft selon la note. Sinon : comportement
             # actuel (cfg.mode decide tout).
             effective_mode = cfg.mode
+            # Capture la review pour la stocker dans le brouillon : Jordan
+            # veut voir la note + le commentaire dans l'onglet Brouillons
+            # pour trier vite (les douteux passent en revue, les bons sont
+            # valides sans relire).
+            review_for_draft: dict | None = None
             if review_enabled:
                 log({"type": "activity",
                      "message": f"La 2è IA relit le mail pour {_prospect_label}..."})
@@ -1031,6 +1062,11 @@ def _run_ai_outreach(
                     log(f"  [review] {prospect.name[:30]} : "
                         f"score={review['score']}/10 verdict={review['verdict']} "
                         f"-- {review['comment'][:80]}")
+                    review_for_draft = {
+                        "score":   int(review.get("score") or 0),
+                        "verdict": str(review.get("verdict") or ""),
+                        "comment": str(review.get("comment") or "")[:300],
+                    }
                     n_reviewed += 1
                     log({"type": "stage", "id": "review", "state": "running",
                          "count": n_reviewed,
@@ -1184,7 +1220,7 @@ def _run_ai_outreach(
                                + (f" depuis {sender_account_id}" if use_pool else "")})
             else:
                 # Mode SAS : on dépose le draft pour validation manuelle
-                prospect.pending_drafts.append({
+                _draft_payload = {
                     "ts": datetime.now().isoformat(timespec="seconds"),
                     "kind": "first_contact",
                     "subject": subject,
@@ -1193,7 +1229,16 @@ def _run_ai_outreach(
                     "template_key": _tpl_key,
                     "provider": cfg.ai_provider,
                     "model": cfg.ai_model,
-                })
+                }
+                # Embarque la note + le commentaire de la 2e IA dans le
+                # brouillon pour que l'UI les affiche cote validation
+                # manuelle (Jordan voit en un coup d'oeil les mails surs
+                # vs ceux qui meritent une relecture humaine attentive).
+                if review_for_draft:
+                    _draft_payload["review_score"]   = review_for_draft["score"]
+                    _draft_payload["review_verdict"] = review_for_draft["verdict"]
+                    _draft_payload["review_comment"] = review_for_draft["comment"]
+                prospect.pending_drafts.append(_draft_payload)
                 prospect.status = "qualified"  # garde "qualified" tant que pas validé
                 n_pending += 1
                 log({"type": "stage", "id": "send", "state": "running",
@@ -1222,6 +1267,33 @@ def _run_ai_outreach(
     log({"type": "stage_done", "id": "send", "count": n_sent + n_pending,
          "message": f"{n_sent} envoyé(s), {n_pending} en brouillon."})
     return n_sent, n_pending
+
+
+def _has_unfilled_placeholder(*texts: str) -> str:
+    """Renvoie le 1er placeholder non rempli trouve dans les textes, sinon "".
+
+    Regle absolue Jordan : DANS TOUS LES CAS, si un placeholder reste dans
+    le sujet ou le corps du mail (variable oubliee, template casse,
+    substitution incomplete), le mail ne doit pas partir -- il est jete et
+    le prospect saute ce run.
+
+    Detecte les deux syntaxes en usage dans les templates Triskell :
+      - 1 accolade : {prenom}, {ville}, {raison_sociale}, ...
+      - 2 accolades : {{first_name}}, {{city}}, {{business_type}}, ...
+
+    Pour eviter les faux positifs, on n'attrape QUE des identifiants
+    plausibles (lettres/chiffres/_), pas des accolades qui pourraient
+    apparaitre dans une URL ou un bout de code accidentel.
+    """
+    import re as _re
+    pat = _re.compile(r"\{\{?[A-Za-z_][A-Za-z0-9_]*\}?\}")
+    for t in texts:
+        if not t:
+            continue
+        m = pat.search(t)
+        if m:
+            return m.group(0)
+    return ""
 
 
 def _looks_like_ai_refusal(body: str) -> bool:
