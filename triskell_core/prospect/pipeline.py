@@ -712,13 +712,18 @@ def _run_ai_outreach(
             from triskell_command.integrations.prospection_templates import (
                 list_prospection_templates,
             )
+            # On charge TOUS les modèles du produit (créateurs ET pros) :
+            # le filtre par catégorie se fait ensuite, prospect par prospect,
+            # selon ce qu'est ce prospect spécifique (un YouTubeur ne reçoit
+            # pas le même mail qu'un commerce SIRENE).
             templates_for_picking = list_prospection_templates(
                 product=cfg.autopilot_product.strip(),
-                audience=(cfg.autopilot_audience or "").strip() or None,
+                audience="",   # vide = pas de filtre global
             ) or []
             use_templates = bool(templates_for_picking)
             log(f"  -> mode templates : {len(templates_for_picking)} template(s) "
-                f"trouve(s) pour produit '{cfg.autopilot_product}'")
+                f"trouve(s) pour produit '{cfg.autopilot_product}' "
+                f"(filtrage par categorie de prospect au moment du pick)")
             if not templates_for_picking:
                 log(f"  [WARN] aucun template prospection pour '{cfg.autopilot_product}' "
                     f"-> fallback generation libre par l'IA")
@@ -897,7 +902,17 @@ def _run_ai_outreach(
                          "reason": _why})
                     continue
 
-            if use_templates:
+            # Filtrage des modèles par catégorie de CE prospect : un
+            # YouTubeur n'a pas droit aux mails écrits pour des PME.
+            # Convention : les modèles sans audience définie tombent dans
+            # 'creator' (les 5 historiques Pixel Pros).
+            prospect_audience = _detect_audience(prospect, cfg)
+            templates_for_this_prospect = [
+                t for t in templates_for_picking
+                if (t.get("audience") or "creator").lower() == prospect_audience
+            ] if use_templates else []
+
+            if use_templates and templates_for_this_prospect:
                 # === Mode templates : pioche le bon modele puis adapte ===
                 from triskell_command.integrations.convoy_ai import (
                     generate_message_from_templates,
@@ -918,13 +933,13 @@ def _run_ai_outreach(
                 # l'IA). Le picker choisira le bon template parmi tous.
                 tp_label = (
                     cfg.autopilot_product.strip()
-                    or (templates_for_picking[0].get("product_label")
-                        if templates_for_picking else "")
+                    or (templates_for_this_prospect[0].get("product_label")
+                        if templates_for_this_prospect else "")
                     or "(catalogue actif)"
                 )
                 gen = generate_message_from_templates(
                     prospect_dict,
-                    templates=templates_for_picking,
+                    templates=templates_for_this_prospect,
                     template_product=tp_label,
                     sender_name=cfg.sender_mon_prenom or "",
                     user_brief=cfg.ai_template_brief or "",
@@ -937,7 +952,14 @@ def _run_ai_outreach(
                 body_html = gen.get("body_html") or ""
                 _tpl_key = gen.get("template_key") or "auto"
             else:
-                # === Mode classique : generation libre ===
+                # === Mode classique : generation libre par l'IA ===
+                # On y arrive soit en l'absence totale de modèles, soit
+                # quand AUCUN modèle ne correspond à la catégorie de ce
+                # prospect en particulier (ex : tu n'as encore aucun modèle
+                # 'pro' alors que ce prospect est une PME).
+                if use_templates and not templates_for_this_prospect:
+                    log(f"  [info] aucun modele '{prospect_audience}' pour "
+                        f"'{prospect.name[:30]}' -> redaction libre par l'IA")
                 user_prompt = _build_personalized_prompt(prospect, cfg)
                 full = build_ultimate_prompt(user_prompt, selected_megas)
                 response = ai_providers.send_to_provider(
