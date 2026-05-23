@@ -819,6 +819,13 @@ def _run_ai_outreach(
     n_sent = 0
     n_pending = 0
     n_reviewed = 0
+    # Round-robin sur les templates de prospection : sans ca, l'IA picker
+    # de generate_message_from_templates pioche pour CHAQUE prospect le
+    # template qu'elle juge le plus pertinent -> elle finit par toujours
+    # choisir le meme. Jordan veut que les modeles tournent (3 prospects
+    # avec 3 templates dispo = 3 templates differents utilises).
+    # Compteur partage entre prospects, filtre par audience plus loin.
+    _template_rr_idx = 0
     # Filet anti-config-corrompue : si la valeur est manquante / 0 / None,
     # on force a 7 (le defaut PipelineConfig). Sans ca, l'etape 4 "Relit"
     # restait silencieusement desactivee chez Jordan a cause d'une vieille
@@ -927,19 +934,30 @@ def _run_ai_outreach(
                     "secteur":        prospect.industry or "",
                     "notes":          (prospect.description or "")[:300],
                 }
-                # En mode multi-produits (templates_override), le nom du
-                # "template_product" passe au prompt picker est celui du
-                # premier template (utilise comme libelle d'orientation pour
-                # l'IA). Le picker choisira le bon template parmi tous.
+                # Round-robin : on pioche le template suivant dans la
+                # liste filtree par audience (et on incremente l'index pour
+                # le prochain prospect). Sans ca, le picker IA en aval
+                # piocherait toujours le meme.
+                _rr_pick = templates_for_this_prospect[
+                    _template_rr_idx % len(templates_for_this_prospect)
+                ]
+                _template_rr_idx += 1
+                _rr_key = _rr_pick.get("key") or "(sans-cle)"
+                log(f"  -> template a tour de role : '{_rr_key}' "
+                    f"({_template_rr_idx}/{len(templates_for_this_prospect)} "
+                    f"de l'audience '{prospect_audience}')")
+                # On force ce template en ne passant QUE celui-la a
+                # generate_message_from_templates : court-circuit du picker
+                # IA (un seul choix possible). Cela fait aussi gagner un
+                # appel IA par prospect.
                 tp_label = (
                     cfg.autopilot_product.strip()
-                    or (templates_for_this_prospect[0].get("product_label")
-                        if templates_for_this_prospect else "")
+                    or (_rr_pick.get("product_label") or "")
                     or "(catalogue actif)"
                 )
                 gen = generate_message_from_templates(
                     prospect_dict,
-                    templates=templates_for_this_prospect,
+                    templates=[_rr_pick],
                     template_product=tp_label,
                     sender_name=cfg.sender_mon_prenom or "",
                     user_brief=cfg.ai_template_brief or "",
