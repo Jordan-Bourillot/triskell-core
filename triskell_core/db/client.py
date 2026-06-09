@@ -48,14 +48,43 @@ class SupabaseNotConfigured(Exception):
 class SupabaseConfig:
     url: str
     anon_key: str
+    # Clé service_role (serveur uniquement). Quand elle est présente, le
+    # client fonctionne en "mode service" : accès permanent à la base, sans
+    # session utilisateur ni JWT qui expire. C'est le mode nominal pour le
+    # serveur HTTP (workers 24/7) — le mode user/anon reste celui du desktop.
+    service_role_key: str = ""
+
+    @classmethod
+    def _settings_service_key(cls) -> str:
+        """Cherche une clé service_role dans les fichiers de settings."""
+        for cfg_path in (
+            TRISKELL_COMMAND_DIR / "settings.json",
+            TRISKELL_PROSPECT_DIR / "config.json",
+            LEDENICHEUR_DIR / "config.json",
+        ):
+            if not cfg_path.exists():
+                continue
+            try:
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            sb = data.get("supabase") or {}
+            key = sb.get("service_role_key") or sb.get("service_key") or ""
+            if key:
+                return key
+        return ""
 
     @classmethod
     def resolve(cls) -> "SupabaseConfig":
         """Résout la config depuis env vars ou settings.json."""
         env_url = os.environ.get("SUPABASE_URL")
         env_key = os.environ.get("SUPABASE_ANON_KEY")
-        if env_url and env_key:
-            return cls(url=env_url, anon_key=env_key)
+        env_service = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+                       or os.environ.get("SUPABASE_SERVICE_KEY") or "")
+        if env_url and (env_key or env_service):
+            return cls(url=env_url, anon_key=env_key or "",
+                       service_role_key=env_service
+                       or cls._settings_service_key())
 
         for cfg_path in (
             TRISKELL_COMMAND_DIR / "settings.json",
@@ -71,8 +100,10 @@ class SupabaseConfig:
             sb = data.get("supabase") or {}
             url = sb.get("url") or ""
             key = sb.get("anon_key") or ""
-            if url and key:
-                return cls(url=url, anon_key=key)
+            service = (sb.get("service_role_key") or sb.get("service_key")
+                       or env_service or "")
+            if url and (key or service):
+                return cls(url=url, anon_key=key, service_role_key=service)
 
         raise SupabaseNotConfigured(
             "Supabase non configuré. Définis SUPABASE_URL + SUPABASE_ANON_KEY "
@@ -99,6 +130,11 @@ class SupabaseClient:
         self._user_display_name: Optional[str] = None
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
+        # Mode service : la clé service_role sert d'autorisation permanente.
+        # Plus aucun JWT utilisateur n'est posé sur le client de données →
+        # plus d'expiration possible (fini les pannes "JWT expired" des
+        # workers qui tournent 24/7 sur le serveur).
+        self._service_mode: bool = bool(config.service_role_key)
 
     # ------------------------------------------------------------------
     # Bas niveau — accès au SDK supabase-py
@@ -112,7 +148,8 @@ class SupabaseClient:
                     "Module 'supabase' non installé. "
                     "pip install supabase"
                 ) from exc
-            self._client = create_client(self.config.url, self.config.anon_key)
+            key = self.config.service_role_key or self.config.anon_key
+            self._client = create_client(self.config.url, key)
         return self._client
 
     @property
@@ -121,8 +158,15 @@ class SupabaseClient:
         return self._ensure_sdk()
 
     @property
+    def service_mode(self) -> bool:
+        """True si le client tourne avec la clé service_role (serveur)."""
+        return self._service_mode
+
+    @property
     def is_authenticated(self) -> bool:
-        return self._user_id is not None
+        # En mode service, l'accès base est permanent : le client est
+        # toujours opérationnel, même sans session utilisateur restaurée.
+        return self._user_id is not None or self._service_mode
 
     @property
     def user_id(self) -> Optional[str]:
@@ -136,13 +180,34 @@ class SupabaseClient:
     # Auth
     # ------------------------------------------------------------------
     def sign_in(self, email: str, password: str) -> dict[str, Any]:
-        """Login email/password. Persiste les tokens dans auth.json."""
-        sb = self._ensure_sdk()
-        try:
-            res = sb.auth.sign_in_with_password({"email": email,
-                                                  "password": password})
-        except Exception as exc:
-            raise SupabaseAuthError(f"Login refusé : {exc}") from exc
+        """Login email/password. Persiste les tokens dans auth.json.
+
+        En mode service, le mot de passe est vérifié sur un client jetable
+        (clé anon) : le client de données garde son autorisation service_role
+        et ne reçoit JAMAIS le JWT utilisateur — seule l'identité (user_id,
+        display_name) est conservée pour l'attribution des écritures.
+        """
+        if self._service_mode:
+            if not self.config.anon_key:
+                raise SupabaseAuthError(
+                    "Login impossible : anon_key absente de la config "
+                    "(le mode service n'en a pas besoin pour les données, "
+                    "mais la vérification du mot de passe oui)."
+                )
+            try:
+                from supabase import create_client  # type: ignore
+                tmp = create_client(self.config.url, self.config.anon_key)
+                res = tmp.auth.sign_in_with_password({"email": email,
+                                                       "password": password})
+            except Exception as exc:
+                raise SupabaseAuthError(f"Login refusé : {exc}") from exc
+        else:
+            sb = self._ensure_sdk()
+            try:
+                res = sb.auth.sign_in_with_password({"email": email,
+                                                      "password": password})
+            except Exception as exc:
+                raise SupabaseAuthError(f"Login refusé : {exc}") from exc
         session = getattr(res, "session", None)
         user = getattr(res, "user", None)
         if session is None or user is None:
@@ -152,7 +217,7 @@ class SupabaseClient:
         self._user_id = user.id
         # Récupère le display_name dans la table users
         try:
-            row = (sb.table("users").select("display_name")
+            row = (self.table("users").select("display_name")
                    .eq("user_id", user.id).limit(1).execute())
             data = row.data or []
             if data:
@@ -167,11 +232,12 @@ class SupabaseClient:
         }
 
     def sign_out(self) -> None:
-        sb = self._ensure_sdk()
-        try:
-            sb.auth.sign_out()
-        except Exception:
-            pass
+        if not self._service_mode:
+            sb = self._ensure_sdk()
+            try:
+                sb.auth.sign_out()
+            except Exception:
+                pass
         self._user_id = None
         self._user_display_name = None
         self._access_token = None
@@ -186,7 +252,22 @@ class SupabaseClient:
         """Charge le token persisté et tente une reprise de session.
 
         Renvoie True si la session a été restaurée avec succès.
+
+        En mode service : on ne pose AUCUN JWT utilisateur sur le client de
+        données (sinon l'autorisation service_role serait remplacée par un
+        token qui expire). On récupère juste l'identité depuis auth.json,
+        pour l'attribution des écritures (created_by / updated_by).
         """
+        if self._service_mode:
+            try:
+                if AUTH_FILE.exists():
+                    data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
+                    self._user_id = data.get("user_id") or self._user_id
+                    self._user_display_name = (data.get("display_name")
+                                               or self._user_display_name)
+            except Exception as exc:
+                logger.debug("Restore identité (mode service) : %s", exc)
+            return True
         if not AUTH_FILE.exists():
             return False
         try:
@@ -230,7 +311,12 @@ class SupabaseClient:
 
         Renvoie True si le refresh a réussi, False sinon.
         Sauvegarde automatiquement les nouveaux tokens dans auth.json.
+
+        En mode service : rien à rafraîchir (l'autorisation service_role
+        n'expire pas) → True direct.
         """
+        if self._service_mode:
+            return True
         if not self._refresh_token:
             return False
         sb = self._ensure_sdk()
@@ -301,6 +387,11 @@ class SupabaseClient:
 
         Utilise la fonction SQL public.current_workspace_id() qui lit auth.uid().
         Cache le résultat pour éviter une RPC par appel.
+
+        En mode service, auth.uid() est NULL → la RPC renvoie None. On
+        retombe alors sur une résolution directe : le workspace du user
+        connu (auth.json), sinon le tout premier workspace créé (cas
+        mono-workspace "triskell-studio").
         """
         cached = getattr(self, "_ws_id_cache", None)
         if cached:
@@ -308,11 +399,33 @@ class SupabaseClient:
         try:
             res = self.raw.rpc("current_workspace_id").execute()
             ws_id = res.data if isinstance(res.data, str) else None
-            self._ws_id_cache = ws_id
-            return ws_id
+            if ws_id:
+                self._ws_id_cache = ws_id
+                return ws_id
         except Exception as exc:
             logger.debug("current_workspace_id RPC: %s", exc)
+        if not self._service_mode:
             return None
+        # Fallback mode service — par user d'abord, sinon 1er workspace.
+        try:
+            if self._user_id:
+                res = (self.table("workspace_members")
+                       .select("workspace_id, joined_at")
+                       .eq("user_id", self._user_id)
+                       .order("joined_at").limit(1).execute())
+                rows = res.data or []
+                if rows and rows[0].get("workspace_id"):
+                    self._ws_id_cache = rows[0]["workspace_id"]
+                    return self._ws_id_cache
+            res = (self.table("workspaces").select("id, created_at")
+                   .order("created_at").limit(1).execute())
+            rows = res.data or []
+            if rows and rows[0].get("id"):
+                self._ws_id_cache = rows[0]["id"]
+                return self._ws_id_cache
+        except Exception as exc:
+            logger.debug("workspace fallback (mode service) : %s", exc)
+        return None
 
     def set_shared_setting(self, key: str, value: Any) -> None:
         try:
