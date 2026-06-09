@@ -90,6 +90,32 @@ def _bump_today_count(by: int = 1) -> int:
 
 
 # ---------------------------------------------------------------------------
+# En-têtes de prospection (désinscription)
+# ---------------------------------------------------------------------------
+def prospection_headers(from_email: str,
+                        extra: dict | None = None) -> dict:
+    """En-têtes à poser sur tout mail de PROSPECTION automatisée.
+
+    `List-Unsubscribe` (mailto) : les clients mail (Gmail, Yahoo…) affichent
+    alors leur bouton natif « Se désabonner ». Le destinataire qui clique
+    envoie un mail avec le sujet "unsubscribe" → le lecteur de boîte le
+    classe en désinscription → statut 'unsubscribed' définitif sur le
+    prospect. Bon pour la conformité ET pour la réputation d'envoi (un
+    désabonnement propre vaut mille fois mieux qu'un signalement spam).
+
+    À NE PAS poser sur les mails transactionnels (factures, livraisons)
+    ni sur la correspondance individuelle.
+    """
+    headers = dict(extra or {})
+    addr = (from_email or "").strip()
+    if addr and "List-Unsubscribe" not in headers:
+        headers["List-Unsubscribe"] = (
+            f"<mailto:{addr}?subject=unsubscribe>"
+        )
+    return headers
+
+
+# ---------------------------------------------------------------------------
 # Envoi
 # ---------------------------------------------------------------------------
 def send_email(
@@ -231,7 +257,15 @@ def run_campaign(
             smtp_cfg = {}
     else:
         smtp_cfg = _load_smtp_config()
-    crm = CRM()
+    # Base partagée (Supabase) si connectée, fichier local sinon — même
+    # branchement central que le pipeline (les relances doivent voir les
+    # MÊMES prospects que l'Auto-pilote, pas un fichier local du serveur).
+    try:
+        from ..core.crm import get_crm
+        crm = get_crm()
+    except Exception:
+        crm = CRM()
+    _remote = crm.__class__.__name__ == "RemoteCRM"
 
     sent_today = _load_today_count()
     remaining = max(0, daily_cap - sent_today)
@@ -273,18 +307,29 @@ def run_campaign(
             continue
 
         try:
-            msg_id = send_email(smtp_cfg, to=to_addr, subject=subject, body=body)
-            p.history.append({
+            msg_id = send_email(
+                smtp_cfg, to=to_addr, subject=subject, body=body,
+                custom_headers=prospection_headers(
+                    smtp_cfg.get("from_email", "")),
+            )
+            _event = {
                 "ts": datetime.now().isoformat(timespec="seconds"),
                 "kind": "email_sent",
                 "to": to_addr,
                 "subject": subject,
                 "template_key": template_key,
                 "message_id": msg_id,
-            })
+            }
+            if _remote and hasattr(crm, "add_history_event"):
+                crm.add_history_event(p, _event)
+            else:
+                p.history.append(_event)
             p.status = "contacted"
             p.last_contact_at = datetime.now().isoformat(timespec="seconds")
-            crm._dirty = True  # noqa: SLF001
+            if _remote:
+                crm.upsert(p)
+            else:
+                crm._dirty = True  # noqa: SLF001
             counters["sent"] += 1
             _bump_today_count()
             crm.save()

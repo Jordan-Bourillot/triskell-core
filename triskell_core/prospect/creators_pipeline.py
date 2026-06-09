@@ -623,11 +623,15 @@ def run_creators_pipeline(
         if cfg.mode == MODE_AUTO:
             # Envoi direct
             try:
-                from .outreach.smtp_sender import _load_smtp_config, send_email
+                from .outreach.smtp_sender import (
+                    _load_smtp_config, prospection_headers, send_email,
+                )
                 smtp_cfg = _load_smtp_config()
                 msg_id = send_email(
                     smtp_cfg, to=p["emails"][0],
                     subject=subject, body=body,
+                    custom_headers=prospection_headers(
+                        smtp_cfg.get("from_email", "")),
                 )
                 p.setdefault("history", []).append({
                     "ts": datetime.now().isoformat(timespec="seconds"),

@@ -251,6 +251,12 @@ class RemoteCRM:
             return
         row = history_event_to_row(rid, event,
                                     created_by=self._client.user_id)
+        # Depuis la migration 20 (multi-tenant), email_history.workspace_id
+        # est NOT NULL : sans lui, l'insert échouait silencieusement (warning)
+        # et l'historique ne montait jamais en base.
+        ws_id = self._ws_id()
+        if ws_id:
+            row["workspace_id"] = ws_id
         try:
             self._client.raw.table("email_history").insert(row).execute()
             prospect.history.append(event)

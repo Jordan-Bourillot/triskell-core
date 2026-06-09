@@ -137,6 +137,13 @@ class PipelineConfig:
     # groupe manuel depuis l'onglet Brouillons.
     send_delay_seconds: int = 0
 
+    # Délivrabilité : plafond d'envois AUTO par run vers des adresses
+    # DEVINÉES (génériques type contact@ / info@, jamais confirmées noir
+    # sur blanc). Les adresses confirmées partent d'abord ; au-delà du
+    # quota, les devinées passent en brouillon au lieu d'envoi direct.
+    # Règle de Jordan : protéger la réputation IONOS partagée.
+    guessed_daily_cap: int = 8
+
     # Auto-pilote v2 : heure de declenchement du run nocturne (Europe/Paris).
     # Le runner verifie toutes les 5 min ; quand on est dans la fenetre
     # [nightly_hour, nightly_hour+1[ ET qu'on n'a pas deja run aujourd'hui,
@@ -173,6 +180,146 @@ class PipelineConfig:
             json.dumps(asdict(self), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+
+# ---------------------------------------------------------------------------
+# CRM du pipeline — base PARTAGÉE (Supabase) d'abord, locale en secours
+# ---------------------------------------------------------------------------
+# C'est LE branchement central de toute la chaîne : historiquement le
+# pipeline lisait UNIQUEMENT le fichier local (~/.triskell-prospect/
+# prospects.json). Sur le serveur web, les outils de recherche poussent
+# pourtant leurs prospects dans la base partagée Supabase → l'Auto-pilote
+# ne les voyait JAMAIS. Le moteur travaille maintenant sur la même base
+# que les outils, avec retour automatique au fichier local quand Supabase
+# n'est pas disponible (desktop hors-ligne, dev) — zéro régression.
+
+def _crm_is_remote(crm) -> bool:
+    return crm.__class__.__name__ == "RemoteCRM"
+
+
+def _pipeline_crm(log: Callable | None = None):
+    """Renvoie le CRM de travail du pipeline (partagé si possible)."""
+    try:
+        from .core.crm import get_crm
+        crm = get_crm()
+    except Exception as exc:
+        logger.debug("get_crm indisponible (%s) — CRM local", exc)
+        crm = CRM()
+    if log:
+        backend = ("base partagée (Supabase)" if _crm_is_remote(crm)
+                   else "base locale (fichier)")
+        try:
+            log(f"  -> source prospects : {backend}")
+        except Exception:
+            pass
+    return crm
+
+
+def _record_event(crm, prospect, event: dict) -> None:
+    """Trace un événement d'historique — en base partagée si possible.
+
+    Sur le CRM partagé, l'événement part dans `email_history` (visible
+    dans la fiche prospect web, compté par les pulses/compteurs). Sur le
+    CRM local, comportement historique (append en mémoire + save()).
+    """
+    if _crm_is_remote(crm) and hasattr(crm, "add_history_event"):
+        try:
+            crm.add_history_event(prospect, event)
+            return
+        except Exception as exc:
+            logger.debug("add_history_event KO (%s) — append local", exc)
+    prospect.history.append(event)
+
+
+def _persist_prospect(crm, prospect) -> None:
+    """Persiste les champs modifiés d'un prospect (status, contact, tags…)."""
+    if _crm_is_remote(crm):
+        try:
+            crm.upsert(prospect)
+        except Exception as exc:
+            logger.warning("persistance prospect KO : %s", exc)
+    else:
+        crm._dirty = True  # noqa: SLF001 — le crm.save() final écrit le fichier
+
+
+def _store_validation_draft(crm, prospect, payload: dict) -> bool:
+    """Dépose un brouillon de validation dans la base partagée.
+
+    Renvoie True si le brouillon est en base (table prospect_drafts →
+    visible dans « Brouillons à valider » du site web). False → l'appelant
+    retombe sur le stockage local historique (pending_drafts).
+    Tolérant au schéma : si les colonnes bonus (body_html, notes de la
+    2e IA — migration 45) n'existent pas encore, on insère sans elles.
+    """
+    if not _crm_is_remote(crm):
+        return False
+    try:
+        rid = crm.get_row_id(prospect)
+        if not rid:
+            return False
+        client = crm._client  # noqa: SLF001
+        row = {
+            "prospect_id": rid,
+            "subject": (payload.get("subject") or "")[:200],
+            "body": payload.get("body") or "",
+            "template_key": payload.get("template_key") or "",
+            "provider": payload.get("provider") or "",
+            "model": payload.get("model") or "",
+            "kind": payload.get("kind") or "first_contact",
+            "status": "pending",
+            "created_by": client.user_id,
+        }
+        try:
+            ws = client._current_workspace_id()  # noqa: SLF001
+        except Exception:
+            ws = None
+        if ws:
+            row["workspace_id"] = ws
+        extended = dict(row)
+        if payload.get("body_html"):
+            extended["body_html"] = payload["body_html"]
+        for k in ("review_score", "review_verdict", "review_comment"):
+            if k in payload:
+                extended[k] = payload[k]
+        sb = client.raw
+        try:
+            sb.table("prospect_drafts").insert(extended).execute()
+        except Exception:
+            # Colonnes bonus absentes (migration 45 pas encore appliquée)
+            sb.table("prospect_drafts").insert(row).execute()
+        return True
+    except Exception as exc:
+        logger.warning("brouillon -> base partagée KO (%s), fallback local", exc)
+        return False
+
+
+# Délivrabilité : adresses génériques = « devinées » au sens de Jordan
+# (jamais confirmées noir sur blanc comme la boîte d'UNE personne).
+GENERIC_EMAIL_LOCALPARTS = frozenset({
+    "contact", "info", "hello", "bonjour", "accueil", "commercial",
+    "secretariat", "administration", "admin", "direction", "office",
+    "mail", "courrier", "reception", "boutique", "magasin",
+})
+
+
+def _email_is_guessed(prospect) -> bool:
+    """True si l'adresse principale du prospect est « devinée ».
+
+    Deux signaux : la source de l'email (guess/footprint = fabriquée),
+    ou un local-part générique (contact@, info@…). Les confirmées
+    partent d'abord, les devinées au compte-gouttes (cf guessed_daily_cap).
+    """
+    email = (prospect.emails[0] if getattr(prospect, "emails", None) else "") or ""
+    email = email.lower().strip()
+    if not email or "@" not in email:
+        return True
+    local = email.split("@", 1)[0]
+    for m in (getattr(prospect, "emails_meta", None) or []):
+        if (m.get("email") or "").lower() == email:
+            if (m.get("source") or "").lower() in ("guess", "footprint"):
+                return True
+            break
+    return local in GENERIC_EMAIL_LOCALPARTS
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +437,7 @@ def run_full_pipeline(
         log({"type": "activity", "message": f"Je vais piocher des prospects dans la source : {cfg.source}"})
         log(f"Étape 1/4 — Recherche {cfg.source}…")
         try:
-            crm = CRM()
+            crm = _pipeline_crm(log)
             iterator, finalize = _search_iterator(cfg, log=log)
             before = len(crm)
             r = crm.upsert_many(iterator)
@@ -563,7 +710,7 @@ def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[in
     from .enrichers.linktree import LinktreeFollower, is_hub
     from .enrichers.web import WebEnricher
 
-    crm = CRM()
+    crm = _pipeline_crm(log)
     web = WebEnricher()
     linktree = LinktreeFollower(web_enricher=web)
     footprint = FootprintFinder() if cfg.enrich_with_footprint else None
@@ -606,7 +753,7 @@ def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[in
                 data = web.enrich_url(url)
                 verdict = _cross_ref(prospect, data, url=url)
                 if verdict == "reject":
-                    prospect.history.append({
+                    _record_event(crm, prospect, {
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "kind": "site_rejected", "url": url,
                     })
@@ -648,7 +795,7 @@ def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[in
                 prospect.address = data["address"]
             if data["has_legal_mentions"]:
                 prospect.has_legal_mentions = True
-            prospect.history.append({
+            _record_event(crm, prospect, {
                 "ts": datetime.now().isoformat(timespec="seconds"),
                 "kind": "web_enrich", "url": url,
             })
@@ -657,14 +804,15 @@ def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[in
                 source_id=norm_website(url), url=url,
             ))
             prospect.updated_at = datetime.now().isoformat(timespec="seconds")
-            crm._dirty = True  # noqa: SLF001
+            _persist_prospect(crm, prospect)
             n_enriched += 1
         except Exception as e:
             logger.debug("enrich %s : %s", prospect.name, e)
         if i % 10 == 0:
             log(f"  → {i}/{len(candidates)} traité(s)…")
 
-    crm._rebuild_index()  # noqa: SLF001
+    if hasattr(crm, "_rebuild_index"):
+        crm._rebuild_index()  # noqa: SLF001
     crm.save()
     log(f"  → {n_enriched} enrichi(s), {n_emails} nouveau(x) email(s)")
     return n_enriched, n_emails
@@ -765,7 +913,7 @@ def _run_ai_outreach(
          "message": "Je trie les prospects pour ne garder que ceux à contacter..."})
     log({"type": "activity",
          "message": "Je trie : on garde ceux qui ont un mail et qu'on n'a jamais contactés..."})
-    crm = CRM()
+    crm = _pipeline_crm(log)
     eligible = [
         p for p in crm.all()
         if p.emails
@@ -904,6 +1052,16 @@ def _run_ai_outreach(
              "message": "La 2è IA relit chaque mail avant validation..."})
     log({"type": "stage", "id": "send", "state": "running", "count": 0,
          "message": "J'attends qu'un mail soit prêt à partir..."})
+
+    # Délivrabilité : adresses CONFIRMÉES d'abord (tri stable), les
+    # devinées (contact@/info@…) en queue + quota d'envoi direct dédié.
+    eligible.sort(key=_email_is_guessed)
+    _guessed_quota = max(0, int(getattr(cfg, "guessed_daily_cap", 8) or 0))
+    _guessed_sent = 0
+    _n_guessed_selected = sum(1 for p in eligible[:cap] if _email_is_guessed(p))
+    if _n_guessed_selected:
+        log(f"  -> {_n_guessed_selected} adresse(s) devinée(s) dans le lot — "
+            f"max {_guessed_quota} partiront en direct, le reste en brouillon")
 
     for i, prospect in enumerate(eligible[:cap], 1):
         _prospect_label = (prospect.name or prospect.legal_name or "(sans nom)")[:60]
@@ -1098,8 +1256,11 @@ def _run_ai_outreach(
                     elif _revised and _was_template:
                         log(f"    -> 2e IA a propose une modif mais on est en mode "
                             f"TEMPLATE, on n'y touche pas (regle de Jordan).")
-                    # Trace la review dans l'historique du prospect
-                    prospect.history.append({
+                    # Trace la review dans l'historique du prospect. Via le
+                    # CRM partagé, elle part dans email_history → le
+                    # compteur "Relit" du tableau de commande remonte ENFIN
+                    # les vrais chiffres (il restait à 0 avant ce branchement).
+                    _record_event(crm, prospect, {
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "kind": "email_reviewed",
                         "score": review["score"],
@@ -1109,6 +1270,15 @@ def _run_ai_outreach(
                     })
                 except Exception as exc:
                     log(f"  [WARN] reviewer plante ({exc}) -> on envoie sans relecture")
+
+            # Délivrabilité : adresse devinée au-delà du quota -> brouillon.
+            # Les confirmées sont passées d'abord (tri en amont), donc on
+            # n'ampute jamais le volume des bonnes adresses.
+            if effective_mode == MODE_AUTO and _email_is_guessed(prospect):
+                if _guessed_sent >= _guessed_quota:
+                    effective_mode = MODE_VALIDATION
+                    log(f"  -> adresse devinée (quota {_guessed_quota}/run "
+                        f"atteint) -> brouillon")
 
             # Etape 8.B : plage horaire d'envoi (Paris). Hors plage -> draft.
             if effective_mode == MODE_AUTO and not _is_within_send_window(cfg):
@@ -1190,13 +1360,19 @@ def _run_ai_outreach(
                 # Envoi direct via SMTP. En mode pool, on a deja resolu
                 # sender_smtp_cfg via le pool ; sinon on tombe sur le compte
                 # principal (legacy).
-                from .outreach.smtp_sender import _load_smtp_config, send_email
+                from .outreach.smtp_sender import (
+                    _load_smtp_config, prospection_headers, send_email,
+                )
                 smtp_cfg = sender_smtp_cfg if sender_smtp_cfg else _load_smtp_config()
                 msg_id = send_email(
                     smtp_cfg, to=prospect.emails[0],
                     subject=subject, body=body, body_html=body_html,
+                    custom_headers=prospection_headers(
+                        (smtp_cfg or {}).get("from_email", "")),
                 )
-                prospect.history.append({
+                if _email_is_guessed(prospect):
+                    _guessed_sent += 1
+                _record_event(crm, prospect, {
                     "ts": datetime.now().isoformat(timespec="seconds"),
                     "kind": "email_sent",
                     "to": prospect.emails[0],
@@ -1209,6 +1385,7 @@ def _run_ai_outreach(
                 })
                 prospect.status = "contacted"
                 prospect.last_contact_at = datetime.now().isoformat(timespec="seconds")
+                _persist_prospect(crm, prospect)
                 # Incremente le cache pool pour le prochain tirage (evite de
                 # re-requeter Supabase a chaque mail).
                 if use_pool:
@@ -1251,8 +1428,13 @@ def _run_ai_outreach(
                     _draft_payload["review_score"]   = review_for_draft["score"]
                     _draft_payload["review_verdict"] = review_for_draft["verdict"]
                     _draft_payload["review_comment"] = review_for_draft["comment"]
-                prospect.pending_drafts.append(_draft_payload)
+                # Base partagée d'abord : le brouillon part dans la table
+                # prospect_drafts → visible dans « Brouillons à valider »
+                # du site. Sinon (hors-ligne) : stockage local historique.
+                if not _store_validation_draft(crm, prospect, _draft_payload):
+                    prospect.pending_drafts.append(_draft_payload)
                 prospect.status = "qualified"  # garde "qualified" tant que pas validé
+                _persist_prospect(crm, prospect)
                 n_pending += 1
                 log({"type": "stage", "id": "send", "state": "running",
                      "count": n_sent + n_pending,
@@ -1260,7 +1442,6 @@ def _run_ai_outreach(
                 log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
                      "name": _prospect_label, "action": "draft",
                      "reason": "mis en brouillon pour validation manuelle"})
-            crm._dirty = True  # noqa: SLF001
         except Exception as e:
             log(f"  ⚠ {prospect.name[:30]} : {e}")
 
