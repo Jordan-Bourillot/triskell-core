@@ -46,6 +46,9 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     "wordpress.com", "wix.com", "wixsite.com", "weebly.com",
     "squarespace.com", "shopify.com", "webflow.io", "vercel.app",
     "netlify.app", "fly.dev",
+    # Marketplaces / réseaux qui hébergent des mini-sites de commerçants :
+    # le mail contact@<marketplace> est celui du support, PAS du commerçant.
+    "sessile.fr", "florajet.com", "interflora.fr", "aquarelle.com",
     # Pollution observée dans la donnée
     "aaa.com", "savagex.com", "gobble.com",
     "nom-de-domaine.com", "votresite.com", "monsite.com",
@@ -192,6 +195,47 @@ def has_mail_record(domain: str, timeout: float = 3.0) -> bool:
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
+# Terminaisons (.com, .fr…) plausibles. Sans cette vérification, la regex
+# accepte n'importe quelle longueur de terminaison → des emails collés à du
+# texte passaient (ex réel observé sur un fleuriste de Rennes :
+# "lebazarapetales@gmail.comwebmaster", le mot "webmaster" soudé au .com).
+# Règle : 2-3 lettres = toujours OK (couvre TOUS les codes pays + com/net/
+# org/biz/pro/app/dev/xyz…) ; 4 lettres et + = uniquement si dans la liste
+# blanche ci-dessous. "comwebmaster" n'y est pas → rejeté.
+KNOWN_LONG_TLDS: frozenset[str] = frozenset({
+    # gTLDs génériques courants
+    "info", "name", "mobi", "aero", "jobs", "coop", "asia", "post",
+    "shop", "site", "club", "blog", "wine", "live", "life", "love",
+    "care", "team", "city", "zone", "town", "fund", "work", "world",
+    "store", "email", "earth", "group", "media", "house", "salon",
+    "photo", "video", "money", "today", "click", "cloud", "space",
+    "studio", "agency", "online", "center", "design", "travel",
+    "photos", "coffee", "garden", "events", "social", "global",
+    "digital", "marketing", "solutions", "services", "company",
+    "business", "boutique", "immobilier", "restaurant", "technology",
+    "photography", "enterprises", "consulting", "construction",
+    # ccTLDs / géographiques longs (réels)
+    "paris", "alsace", "corsica", "bretagne", "brussels", "museum",
+})
+
+
+def _tld_is_plausible(domain: str) -> bool:
+    """Vrai si la terminaison du domaine ressemble à une vraie terminaison.
+
+    2-3 lettres → toujours plausible (codes pays + com/net/org/biz/pro…).
+    4 lettres et + → uniquement si dans KNOWN_LONG_TLDS (sinon c'est
+    presque toujours du texte soudé à un vrai TLD, type "comwebmaster").
+    """
+    if not domain or "." not in domain:
+        return False
+    tld = domain.rsplit(".", 1)[-1].lower()
+    if not tld.isalpha():
+        return False
+    if len(tld) <= 3:
+        return True
+    return tld in KNOWN_LONG_TLDS
+
+
 def is_fake_domain(domain: str) -> bool:
     """Vrai si le domaine est un placeholder factice (jamais valide en réel)."""
     if not domain:
@@ -243,6 +287,11 @@ def clean_email(email: str) -> str | None:
         return None
     norm = normalize_domain(domain)
     if is_platform_domain(norm) or is_fake_domain(norm):
+        return None
+
+    # 3bis. Terminaison invalide (texte soudé au .com, faute de frappe…) →
+    # rejet. Sans ça, "x@gmail.comwebmaster" passait.
+    if not _tld_is_plausible(norm):
         return None
 
     # 4. Local-part ambigu (ex: "info") légitime sauf si on a déjà un autre

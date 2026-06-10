@@ -118,6 +118,41 @@ def test_aplatit_sous_domaine_links():
 
 
 # ---------------------------------------------------------------------------
+# Terminaison invalide (bug réel observé en test grandeur nature le
+# 2026-06-10 : un fleuriste de Rennes via le Prospecteur Google ramenait
+# "lebazarapetales@gmail.comwebmaster" — le mot "webmaster" soudé au .com)
+# ---------------------------------------------------------------------------
+
+def test_rejette_terminaison_soudee_a_du_texte():
+    """gmail.comwebmaster : terminaison invalide → rejet."""
+    assert clean_email("lebazarapetales@gmail.comwebmaster") is None
+    assert clean_email("x@domaine.commercedetail") is None
+
+
+def test_garde_le_vrai_email_a_cote_du_casse():
+    """Le bon email du même commerçant reste accepté."""
+    assert (clean_email("lebazarapetales@gmail.com")
+            == "lebazarapetales@gmail.com")
+
+
+def test_accepte_terminaisons_longues_reelles():
+    """Les vraies terminaisons de 4+ lettres passent (régression brussels,
+    studio, online, bretagne…)."""
+    for email in ("info@bruxellesformation.brussels",
+                  "contact@triskell.studio",
+                  "hello@studio.agency",
+                  "contact@plomberie.online",
+                  "jardin@boutique.bretagne"):
+        assert clean_email(email) == email, f"{email} aurait dû passer"
+
+
+def test_rejette_marketplace_fleuristes():
+    """contact@sessile.fr (marketplace) n'est pas le mail du commerçant."""
+    assert clean_email("contact@sessile.fr") is None
+    assert clean_email("contact@interflora.fr") is None
+
+
+# ---------------------------------------------------------------------------
 # Exécution directe (sans pytest)
 # ---------------------------------------------------------------------------
 
