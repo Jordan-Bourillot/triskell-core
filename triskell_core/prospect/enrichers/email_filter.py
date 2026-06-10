@@ -46,6 +46,12 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     "wordpress.com", "wix.com", "wixsite.com", "weebly.com",
     "squarespace.com", "shopify.com", "webflow.io", "vercel.app",
     "netlify.app", "fly.dev",
+    # Hébergeurs : leur mail (support@ovhcloud.com…) traîne sur les pages
+    # d'erreur/parking des sites clients — jamais le mail du prospect.
+    # (Observé en vrai le 10/06/2026 sur un plombier de Saint-Erblon.)
+    "ovhcloud.com", "ovh.com", "ovh.net", "gandi.net",
+    "ionos.fr", "ionos.com", "o2switch.fr", "infomaniak.com",
+    "hostinger.com", "hostinger.fr",
     # Marketplaces / réseaux qui hébergent des mini-sites de commerçants :
     # le mail contact@<marketplace> est celui du support, PAS du commerçant.
     "sessile.fr", "florajet.com", "interflora.fr", "aquarelle.com",
@@ -60,17 +66,24 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
 FAKE_DOMAINS: frozenset[str] = frozenset({
     "aaa.com", "bbb.com", "ccc.com", "xxx.com",
     "example.com", "example.fr", "example.org", "example.net",
+    "exemple.com", "exemple.fr",
     "domain.com", "test.com", "email.com", "mail.com",
     "gobble.com", "savagex.com",
     "yourcompany.com", "yoursite.com", "yourbusiness.com",
     "votre-email.com", "votresite.com", "monsite.com",
     "nom-de-domaine.com",
+    # Placeholders de templates de sites (observé en vrai le 10/06/2026 :
+    # « votre@adressemail.com » sur le site d'un coiffeur de Vannes).
+    "adressemail.com", "adresse-email.com", "adresseemail.com",
+    "votremail.com", "monemail.com", "emailaddress.com",
 })
 
 # Local-parts qui sont JAMAIS des emails légitimes : presque toujours
 # des fragments de texte/URL ("only" / "online" / "more"...) parsés à tort.
 SUSPICIOUS_LOCAL_PARTS: frozenset[str] = frozenset({
     "only", "online", "more",
+    # Placeholders : « votre@… » / « your@… » ne sont jamais de vrais comptes.
+    "votre", "your",
 })
 
 # Local-parts AMBIGUS : légitimes en soi (info@vraie-boite.com existe), mais
