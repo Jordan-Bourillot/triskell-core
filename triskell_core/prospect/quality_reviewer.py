@@ -48,7 +48,7 @@ REGLES :
 - Si tu en proposes une, body_revised = le corps complet du mail avec ta \
 modif integree (et SEULEMENT ta modif). Le reste du mail reste intact.
 - Ne touche pas a la signature, ni aux URLs, ni au sujet.
-- VOUVOIEMENT obligatoire (jamais de tutoiement).
+{tone_rule}
 
 Reponds UNIQUEMENT en JSON, sans markdown, sans commentaire avant ou apres :
 {{
@@ -77,10 +77,15 @@ def review_email(
     provider: str,
     model: str,
     api_keys: dict[str, str],
+    audience: str = "",
 ) -> dict[str, Any]:
     """Demande a la 2e IA de relire et noter le mail.
 
     Renvoie {score: int, verdict: 'ok'|'draft', comment: str, raw: str}.
+
+    audience : 'creator' -> les modeles createurs sont VOLONTAIREMENT en
+    tutoiement (ecrits a la main), la relectrice ne doit pas penaliser ca.
+    Autre valeur / vide -> regle pro classique (vouvoiement obligatoire).
 
     En cas d'erreur de l'IA ou de reponse malformee, renvoie un verdict
     conservatif ('draft' avec score=0) pour que l'humain ait le dernier mot.
@@ -93,10 +98,20 @@ def review_email(
                 "comment": "providers IA indisponibles",
                 "body_revised": "", "raw": ""}
 
+    if (audience or "").strip().lower() == "creator":
+        tone_rule = (
+            "- Ce prospect est un CREATEUR (YouTube, Twitch...) : le "
+            "tutoiement est VOULU par l'auteur du modele. Ne baisse pas la "
+            "note pour ca et ne le transforme pas en vouvoiement."
+        )
+    else:
+        tone_rule = "- VOUVOIEMENT obligatoire (jamais de tutoiement)."
+
     prompt = _REVIEW_PROMPT.format(
         prospect_context=(prospect_context or "(aucun contexte)").strip()[:600],
         subject=(subject or "(sans objet)").strip()[:200],
         body=(body or "").strip()[:3000],
+        tone_rule=tone_rule,
     )
 
     raw = ""

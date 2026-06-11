@@ -55,6 +55,13 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     # Marketplaces / réseaux qui hébergent des mini-sites de commerçants :
     # le mail contact@<marketplace> est celui du support, PAS du commerçant.
     "sessile.fr", "florajet.com", "interflora.fr", "aquarelle.com",
+    # Vente / parking de domaines : quand le site d'un prospect est expiré,
+    # la page de parking affiche le mail de la régie (service@atom.com,
+    # info@sedo.com…) — jamais celui du prospect. Observé en vrai le
+    # 10/06/2026 : deux brouillons d'autopilote visaient ces adresses.
+    "atom.com", "squadhelp.com", "sedo.com", "dan.com", "afternic.com",
+    "hugedomains.com", "buydomains.com", "domainmarket.com",
+    "brandbucket.com", "parkingcrew.net", "bodis.com", "above.com",
     # Pollution observée dans la donnée
     "aaa.com", "savagex.com", "gobble.com",
     "nom-de-domaine.com", "votresite.com", "monsite.com",
@@ -76,6 +83,12 @@ FAKE_DOMAINS: frozenset[str] = frozenset({
     # « votre@adressemail.com » sur le site d'un coiffeur de Vannes).
     "adressemail.com", "adresse-email.com", "adresseemail.com",
     "votremail.com", "monemail.com", "emailaddress.com",
+    # Placeholder universel des pages de parking de domaines
+    # (« inquire@webname.com » affiché sur tout domaine en vente).
+    "webname.com", "yourdomain.com", "your-domain.com",
+    "yourwebsite.com", "mywebsite.com", "mysite.com", "placeholder.com",
+    "votredomaine.com", "votre-domaine.com", "votredomaine.fr",
+    "mondomaine.com", "mon-domaine.com", "mondomaine.fr",
 })
 
 # Local-parts qui sont JAMAIS des emails légitimes : presque toujours

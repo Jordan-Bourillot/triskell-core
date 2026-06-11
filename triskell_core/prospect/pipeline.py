@@ -281,6 +281,10 @@ def _store_validation_draft(crm, prospect, payload: dict) -> bool:
         for k in ("review_score", "review_verdict", "review_comment"):
             if k in payload:
                 extended[k] = payload[k]
+        # Câblage modèle→adresse (migration 46) : l'adresse d'expéditeur
+        # exigée voyage avec le brouillon jusqu'à la validation.
+        if payload.get("sender_address"):
+            extended["sender_address"] = payload["sender_address"]
         sb = client.raw
         try:
             sb.table("prospect_drafts").insert(extended).execute()
@@ -322,6 +326,45 @@ def _email_is_guessed(prospect) -> bool:
     return local in GENERIC_EMAIL_LOCALPARTS
 
 
+def _route_for_template_address(template_from: str,
+                                 pool_addr_to_account: dict,
+                                 pool_remaining: dict) -> tuple:
+    """Câblage modèle→adresse : routage de l'expéditeur exigé par le modèle.
+
+    Un modèle de prospection peut exiger SON adresse d'envoi (champ
+    « Expéditeur (adresse) » du modèle). Règle absolue : si une adresse
+    est exigée, le mail ne part JAMAIS par une autre — au pire il devient
+    un brouillon. Fini les mails Pixel Pros signés d'une autre marque par
+    tirage au sort.
+
+    Args:
+        template_from        : adresse exigée par le modèle ("" = aucune).
+        pool_addr_to_account : {adresse (lower) → account_id} des comptes du
+                               pool d'envoi dont la config SMTP est résolue.
+        pool_remaining       : {account_id → envois restants sur 24 h}.
+
+    Renvoie (decision, account_id) :
+      - ("none", "")        : pas d'adresse exigée → tirage pool habituel.
+      - ("ok", account_id)  : compte trouvé, capacité 24 h restante.
+      - ("cap", account_id) : compte trouvé mais plafond 24 h atteint.
+      - ("missing", "")     : adresse exigée absente du pool d'envoi
+                              (compte non déclaré ou SMTP incomplet).
+    """
+    addr = (template_from or "").strip().lower()
+    if not addr:
+        return ("none", "")
+    aid = (pool_addr_to_account or {}).get(addr) or ""
+    if not aid:
+        return ("missing", "")
+    try:
+        remaining = int((pool_remaining or {}).get(aid, 0))
+    except Exception:
+        remaining = 0
+    if remaining <= 0:
+        return ("cap", aid)
+    return ("ok", aid)
+
+
 # ---------------------------------------------------------------------------
 # Stats accumulées par run
 # ---------------------------------------------------------------------------
@@ -360,6 +403,60 @@ def _is_within_send_window(cfg: "PipelineConfig") -> bool:
     if start < end:
         return start <= h < end
     return h >= start or h < end
+
+
+def _resolve_review_min_score(raw) -> int:
+    """Seuil effectif de la 2e IA de relecture.
+
+    Convention a trois etats :
+      - n > 0  : seuil choisi (note minimale pour autoriser l'envoi direct)
+      - -1     : relecture VOLONTAIREMENT coupee (interrupteur Relit=Manuel
+                 du tableau de commande) -> 0, pas de relecture
+      - 0 / absent / invalide : vieille config sans le champ -> on restaure
+                 le defaut 7 (filet anti-config-corrompue). Avant ce filet,
+                 l'etape "Relit" restait silencieusement desactivee chez
+                 Jordan a cause d'une config historique.
+    """
+    try:
+        n = int(raw)
+    except Exception:
+        n = 0
+    if n < 0:
+        return 0
+    if n == 0:
+        return 7
+    return min(10, n)
+
+
+def _effective_template_brief(cfg: "PipelineConfig") -> str:
+    """Consignes de redaction effectives : celles de la config si remplies,
+    sinon le brief par defaut de PipelineConfig.
+
+    La page Reglages du site sauvegarde la config entiere, champ vide
+    compris : un brief efface ne doit pas priver l'IA libre du format
+    strict "OBJET : ..." (sans lui, le sujet retombe sur un generique).
+    """
+    brief = (getattr(cfg, "ai_template_brief", "") or "").strip()
+    if brief:
+        return brief
+    return PipelineConfig.__dataclass_fields__["ai_template_brief"].default
+
+
+# Placeholders d'identite : si un modele les utilise, le prospect doit avoir
+# un nom, sinon le mail part avec un trou ("pour une entreprise comme , ...").
+_IDENTITY_PLACEHOLDERS = (
+    "{prenom}", "{nom}", "{raison_sociale}",
+    "{{first_name}}", "{{last_name}}", "{{name}}",
+    "{{company_name}}", "{{company}}",
+)
+
+
+def _template_requires_identity(template: dict) -> bool:
+    """True si le sujet ou le corps du modele cite le nom du prospect."""
+    blob = ((template.get("subject") or "")
+            + "\n" + (template.get("body_text") or "")
+            + "\n" + (template.get("body_html") or ""))
+    return any(ph in blob for ph in _IDENTITY_PLACEHOLDERS)
 
 
 def _count_mails_sent_last_24h(sb_client) -> int:
@@ -991,19 +1088,17 @@ def _run_ai_outreach(
     # avec 3 templates dispo = 3 templates differents utilises).
     # Compteur partage entre prospects, filtre par audience plus loin.
     _template_rr_idx = 0
-    # Filet anti-config-corrompue : si la valeur est manquante / 0 / None,
-    # on force a 7 (le defaut PipelineConfig). Sans ca, l'etape 4 "Relit"
-    # restait silencieusement desactivee chez Jordan a cause d'une vieille
-    # config qui n'avait pas le champ.
+    # Seuil de relecture a trois etats (cf _resolve_review_min_score) :
+    # -1 = coupe par l'interrupteur Relit=Manuel ; 0/absent = vieille config
+    # -> defaut 7 ; n > 0 = seuil choisi.
     _review_score_raw = getattr(cfg, "autopilot_review_min_score", None)
+    _review_score = _resolve_review_min_score(_review_score_raw)
     try:
-        _review_score = int(_review_score_raw)
+        if int(_review_score_raw or 0) == 0 and _review_score == 7:
+            log("  -> [info] autopilot_review_min_score etait 0 ou absent -> "
+                "force a 7 (defaut). La 2e IA va relire chaque mail.")
     except Exception:
-        _review_score = 0
-    if _review_score <= 0:
-        _review_score = 7  # restaure le defaut
-        log("  -> [info] autopilot_review_min_score etait 0 ou absent -> "
-            "force a 7 (defaut). La 2e IA va relire chaque mail.")
+        pass
     cfg.autopilot_review_min_score = _review_score
     review_enabled = _review_score > 0
     log(f"  -> relecture 2e IA : {'ACTIVE' if review_enabled else 'desactivee'} "
@@ -1044,6 +1139,17 @@ def _run_ai_outreach(
             log(f"  [WARN] sender pool indisponible ({exc}) -> mono-adresse")
             use_pool = False
             pool_tracker = None
+
+    # Index adresse → compte du pool (câblage modèle→adresse). Une adresse
+    # n'y figure que si son compte est dans le pool ET sa config SMTP est
+    # résolue (donc réellement envoyable).
+    pool_addr_to_account: dict[str, str] = {}
+    if use_pool:
+        _pool_ids = {p["account_id"] for p in pool}
+        for _aid, _scfg in (sender_pool_smtp or {}).items():
+            _addr = ((_scfg or {}).get("from_email") or "").strip().lower()
+            if _addr and _aid in _pool_ids:
+                pool_addr_to_account[_addr] = _aid
 
     log({"type": "stage", "id": "write", "state": "running", "count": 0,
          "message": "Je rédige les mails un par un..."})
@@ -1094,6 +1200,7 @@ def _run_ai_outreach(
                 if (t.get("audience") or "creator").lower() == prospect_audience
             ] if use_templates else []
 
+            _html_is_custom = False
             if use_templates and templates_for_this_prospect:
                 # === Mode templates : pioche le bon modele puis adapte ===
                 from triskell_command.integrations.convoy_ai import (
@@ -1117,6 +1224,20 @@ def _run_ai_outreach(
                     _template_rr_idx % len(templates_for_this_prospect)
                 ]
                 _template_rr_idx += 1
+                # Garde-fou trou d'identite : si le modele cite le nom du
+                # prospect ({{name}}, {raison_sociale}...) et que la fiche
+                # n'a aucun nom, la substitution laisserait un trou ("pour
+                # une entreprise comme , ..."). On saute ce prospect.
+                if (_template_requires_identity(_rr_pick)
+                        and not prospect_dict["raison_sociale"].strip()):
+                    log(f"  [skip] (fiche sans nom) : le modele "
+                        f"'{_rr_pick.get('key') or '?'}' cite le nom du "
+                        f"prospect -> mail troue, prospect saute ce run")
+                    log({"type": "prospect_touched",
+                         "id": getattr(prospect, "id", ""),
+                         "name": _prospect_label, "action": "skipped",
+                         "reason": "fiche sans nom pour un modele nominatif"})
+                    continue
                 _rr_key = _rr_pick.get("key") or "(sans-cle)"
                 log(f"  -> template a tour de role : '{_rr_key}' "
                     f"({_template_rr_idx}/{len(templates_for_this_prospect)} "
@@ -1135,7 +1256,7 @@ def _run_ai_outreach(
                     templates=[_rr_pick],
                     template_product=tp_label,
                     sender_name=cfg.sender_mon_prenom or "",
-                    user_brief=cfg.ai_template_brief or "",
+                    user_brief=_effective_template_brief(cfg),
                     provider=cfg.ai_provider,
                     model=cfg.ai_model,
                     api_keys=api_keys,
@@ -1143,7 +1264,12 @@ def _run_ai_outreach(
                 subject  = gen.get("subject") or ""
                 body     = gen.get("body") or ""
                 body_html = gen.get("body_html") or ""
+                _html_is_custom = bool(gen.get("html_is_custom"))
                 _tpl_key = gen.get("template_key") or "auto"
+                # Câblage modèle→adresse : le modèle peut exiger SON
+                # adresse d'expéditeur. Mémorisée ici, appliquée au
+                # moment du choix d'adresse (et stockée dans le brouillon).
+                _tpl_from = (_rr_pick.get("from_address") or "").strip()
             else:
                 # === Mode classique : generation libre par l'IA ===
                 # On y arrive soit en l'absence totale de modèles, soit
@@ -1161,6 +1287,7 @@ def _run_ai_outreach(
                 subject, body = _parse_ai_response(response, prospect, cfg)
                 body_html = ""  # genere apres signature (cf. plus bas)
                 _tpl_key = "ai_pipeline"
+                _tpl_from = ""  # generation libre : pas d'adresse exigee
 
             # === Garde-fou anti-placeholder oublie (regle absolue Jordan) ===
             # Si un {variable} ou {{variable}} traine dans le sujet ou le
@@ -1222,6 +1349,7 @@ def _run_ai_outreach(
                         provider=cfg.ai_provider,
                         model=cfg.ai_model,
                         api_keys=api_keys,
+                        audience=prospect_audience,
                     )
                     log(f"  [review] {prospect.name[:30]} : "
                         f"score={review['score']}/10 verdict={review['verdict']} "
@@ -1295,13 +1423,48 @@ def _run_ai_outreach(
                         f"-> brouillon (relance demain)")
 
             # === Choix de l'adresse expeditrice ===
-            # Mode pool : tirage aleatoire dans le pool, en respectant les
-            # caps 24h glissantes (deja envoyes via pool_counts_24h cache +
-            # compteur incremente a chaque envoi reussi). Si pool sature ->
-            # bascule en brouillon. Mode mono : "primary" (legacy).
+            # 1) Câblage modèle→adresse : si le modèle exige une adresse
+            #    (champ « Expéditeur (adresse) »), le mail part par CE
+            #    compte du pool — ou devient un brouillon. JAMAIS par une
+            #    autre adresse (fini les mails Pixel Pros signés Lagriffe).
+            # 2) Sinon, mode pool : tirage aleatoire dans le pool, en
+            #    respectant les caps 24h glissantes. Pool sature -> draft.
+            #    Mode mono : "primary" (legacy).
             sender_account_id = "primary"
             sender_smtp_cfg = None
-            if effective_mode == MODE_AUTO and use_pool and pool_tracker is not None:
+            _route, _route_aid = _route_for_template_address(
+                _tpl_from, pool_addr_to_account,
+                {p["account_id"]: p["daily_cap"]
+                                  - pool_counts_24h.get(p["account_id"], 0)
+                 for p in pool} if use_pool else {},
+            )
+            if _route in ("ok", "cap"):
+                # Compte exigé identifié : c'est lui qui signe aussi le
+                # brouillon éventuel (cohérence adresse ↔ signature).
+                sender_account_id = _route_aid
+                sender_smtp_cfg = dict(
+                    (sender_pool_smtp or {}).get(_route_aid) or {}) or None
+            if effective_mode == MODE_AUTO and _route == "missing":
+                effective_mode = MODE_VALIDATION
+                log(f"  -> le modele exige l'adresse '{_tpl_from}' mais elle "
+                    f"n'est pas dans le pool d'envoi de l'Auto-pilote -> "
+                    f"brouillon (jamais une autre adresse)")
+            elif effective_mode == MODE_AUTO and _route == "cap":
+                effective_mode = MODE_VALIDATION
+                log(f"  -> l'adresse '{_tpl_from}' exigee par le modele est "
+                    f"au plafond 24h -> brouillon (jamais une autre adresse)")
+            elif effective_mode == MODE_AUTO and _route == "ok":
+                if not sender_smtp_cfg:
+                    # Defense : ne doit pas arriver (l'index est construit
+                    # depuis les SMTP resolus), mais jamais d'envoi par une
+                    # autre adresse que celle exigee.
+                    effective_mode = MODE_VALIDATION
+                    log(f"  -> config SMTP du compte '{sender_account_id}' "
+                        f"absente -> brouillon")
+                else:
+                    log(f"  -> adresse exigee par le modele : envoi via "
+                        f"'{sender_account_id}' ({_tpl_from})")
+            elif effective_mode == MODE_AUTO and use_pool and pool_tracker is not None:
                 pool_with_remaining = [
                     {"account_id": p["account_id"],
                      "daily_cap":  max(0, p["daily_cap"]
@@ -1337,18 +1500,23 @@ def _run_ai_outreach(
                 log(f"  [WARN] signature non ajoutée ({_sig_exc})")
 
             # === Mise en forme HTML legere (Auto-pilote v2) ===
-            # En mode libre, on transforme le texte signe en HTML propre :
-            # wrapper sobre, paragraphes <p>, URLs cliquables. Mode templates :
-            # body_html est deja genere par generate_message_from_templates
-            # (qui respecte le HTML custom du template si present), on ne
-            # le retouche pas.
-            if not use_templates:
+            # Le HTML est (re)genere a partir du texte SIGNE, sauf si le
+            # modele apporte son propre HTML ecrit a la main (_html_is_custom).
+            # Avant : en mode template sans HTML custom, le HTML etait fige
+            # AVANT l'ajout de la signature -> Gmail (qui affiche le HTML)
+            # montrait le mail sans signature alors que la version texte
+            # l'avait.
+            if not _html_is_custom:
                 try:
                     from triskell_command.integrations.convoy_ai import (
-                        text_to_email_html,
+                        _first_url_in, text_to_email_html,
                     )
                     body_html = text_to_email_html(
                         body, sender_name=cfg.sender_mon_prenom or "",
+                        # Bouton CTA en bas uniquement en mode modele (meme
+                        # rendu qu'avant), pas en generation libre.
+                        primary_url=(_first_url_in(body) if use_templates else ""),
+                        primary_label="En savoir plus",
                     )
                 except Exception as _exc:
                     logger.debug("text_to_email_html indispo: %s", _exc)
@@ -1420,6 +1588,11 @@ def _run_ai_outreach(
                     "provider": cfg.ai_provider,
                     "model": cfg.ai_model,
                 }
+                # Câblage modèle→adresse : l'exigence suit le brouillon.
+                # À la validation, le mail partira par CE compte ou ne
+                # partira pas (même si le brouillon dort des jours).
+                if _tpl_from:
+                    _draft_payload["sender_address"] = _tpl_from
                 # Embarque la note + le commentaire de la 2e IA dans le
                 # brouillon pour que l'UI les affiche cote validation
                 # manuelle (Jordan voit en un coup d'oeil les mails surs
@@ -1667,7 +1840,7 @@ def _build_personalized_prompt(prospect: Prospect, cfg: PipelineConfig) -> str:
         f"MON PRÉNOM : {cfg.sender_mon_prenom or '(non renseigné)'}\n\n"
         f"{ton_instruction}\n\n"
         f"{mise_en_forme}\n\n"
-        f"CONSIGNES :\n{cfg.ai_template_brief}\n"
+        f"CONSIGNES :\n{_effective_template_brief(cfg)}\n"
     )
 
 
@@ -1799,7 +1972,9 @@ def _first_useful_url(prospect: Prospect) -> str:
 # ---------------------------------------------------------------------------
 def approve_draft(prospect_match_key: str, draft_index: int = 0) -> dict:
     """Envoie le draft #idx d'un prospect (mode SAS → réel envoi)."""
-    from .outreach.smtp_sender import _load_smtp_config, send_email
+    from .outreach.smtp_sender import (
+        _load_smtp_config, prospection_headers, send_email,
+    )
     crm = CRM()
     target = None
     for p in crm.all():
@@ -1810,15 +1985,80 @@ def approve_draft(prospect_match_key: str, draft_index: int = 0) -> dict:
         return {"ok": False, "reason": "prospect introuvable"}
     if not target.pending_drafts or draft_index >= len(target.pending_drafts):
         return {"ok": False, "reason": "aucun draft à valider"}
+    # La situation a pu changer depuis la creation du brouillon : un
+    # desinscrit / rebond / refus / client ne doit plus jamais recevoir
+    # de mail, meme valide a la main.
+    _blocked = {
+        "unsubscribed": "ce prospect s'est désinscrit — envoi interdit",
+        "bounced":      "l'adresse de ce prospect est morte (rebond)",
+        "refused":      "ce prospect a refusé — on ne le recontacte pas",
+        "won":          "ce prospect est déjà client",
+        "lost":         "cycle clos avec ce prospect",
+    }
+    if (target.status or "").lower() in _blocked:
+        return {"ok": False, "reason": _blocked[(target.status or "").lower()]}
     draft = target.pending_drafts.pop(draft_index)
+
+    # Regle absolue anti-placeholder : un brouillon avec une variable non
+    # remplie ne part JAMAIS, meme valide a la main (le validateur humain
+    # peut rater un {{x}} au milieu d'un long mail).
+    _orphan = _has_unfilled_placeholder(
+        draft.get("subject", ""), draft.get("body", ""))
+    if _orphan:
+        target.pending_drafts.insert(draft_index, draft)
+        crm._dirty = True  # noqa: SLF001
+        crm.save()
+        return {"ok": False,
+                "reason": f"variable non remplie dans le mail : {_orphan}"}
 
     try:
         smtp_cfg = _load_smtp_config()
+        # Câblage modèle→adresse : un brouillon qui exige une adresse
+        # d'expéditeur part par le compte correspondant ou ne part pas —
+        # jamais par une autre adresse (même validé à la main).
+        _wanted = (draft.get("sender_address") or "").strip().lower()
+        if _wanted and ((smtp_cfg or {}).get("from_email")
+                        or "").strip().lower() != _wanted:
+            _acc = None
+            try:
+                from triskell_command.integrations.shared_secrets import (
+                    get_account_by_address,
+                )
+                try:
+                    from triskell_core.db import get_client as _gc
+                    _cl = _gc()
+                except Exception:
+                    _cl = None
+                _acc = get_account_by_address(_wanted, client=_cl)
+            except Exception:
+                _acc = None
+            _required = ("smtp_host", "smtp_user", "smtp_password",
+                         "from_email")
+            if _acc and all(_acc.get(k) for k in _required):
+                smtp_cfg = {
+                    "smtp_host":     _acc.get("smtp_host"),
+                    "smtp_port":     int(_acc.get("smtp_port") or 587),
+                    "smtp_user":     _acc.get("smtp_user"),
+                    "smtp_password": _acc.get("smtp_password"),
+                    "from_email":    _acc.get("from_email"),
+                    "from_name":     _acc.get("from_name", ""),
+                }
+            else:
+                target.pending_drafts.insert(draft_index, draft)
+                crm._dirty = True  # noqa: SLF001
+                crm.save()
+                return {"ok": False,
+                        "reason": (f"ce brouillon doit partir de l'adresse "
+                                   f"{_wanted}, introuvable dans les "
+                                   f"adresses d'envoi — rien envoyé")}
         msg_id = send_email(
             smtp_cfg,
             to=target.emails[0] if target.emails else "",
             subject=draft["subject"],
             body=draft["body"],
+            body_html=draft.get("body_html", ""),
+            custom_headers=prospection_headers(
+                smtp_cfg.get("from_email", "")),
         )
         target.history.append({
             "ts": datetime.now().isoformat(timespec="seconds"),
