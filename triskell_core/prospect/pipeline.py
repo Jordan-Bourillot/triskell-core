@@ -1081,6 +1081,7 @@ def _run_ai_outreach(
     n_sent = 0
     n_pending = 0
     n_reviewed = 0
+    n_repaired = 0  # fiches réparées par la 3e IA (record_repair)
     # Round-robin sur les templates de prospection : sans ca, l'IA picker
     # de generate_message_from_templates pioche pour CHAQUE prospect le
     # template qu'elle juge le plus pertinent -> elle finit par toujours
@@ -1419,6 +1420,68 @@ def _run_ai_outreach(
                 except Exception as exc:
                     log(f"  [WARN] reviewer plante ({exc}) -> on envoie sans relecture")
 
+            # === Étape 7.bis : la 3e IA répare la FICHE si c'est elle la cause ===
+            # Un mail mis en brouillon par la relecture vient parfois d'une
+            # fiche sale (nom pollué par la description collée, secteur mal
+            # classé → mauvaise démo). Avant : le brouillon fautif restait et
+            # le même mail cassé revenait à chaque passage. Maintenant : on
+            # répare la fiche (données INTERNES uniquement — name/industry/
+            # description —, JAMAIS d'enrichissement extérieur, règle Jordan),
+            # on NE crée PAS le brouillon fautif, et le mail est régénéré
+            # proprement au prochain passage. Garde-fous : une seule tentative
+            # par fiche (tag), et tout échec retombe sur le brouillon normal.
+            if (review_for_draft is not None
+                    and review_for_draft.get("verdict") == "draft"
+                    and "fiche_reparee" not in (prospect.tags or [])):
+                try:
+                    from .record_repair import (
+                        REPAIR_TAG, name_looks_polluted, split_polluted_name,
+                        propose_repair)
+                    patch: dict = {}
+                    # 1) Heuristique gratuite : nom pollué -> découpage net.
+                    if name_looks_polluted(prospect.name or ""):
+                        parts = split_polluted_name(prospect.name or "")
+                        if parts:
+                            patch["name"] = parts[0]
+                            if not (prospect.description or "").strip():
+                                patch["description"] = parts[1]
+                    # 2) Sinon, la 3e IA diagnostique la fiche elle-même.
+                    if not patch:
+                        rep = propose_repair(
+                            name=prospect.name or "",
+                            industry=prospect.industry or "",
+                            description=prospect.description or "",
+                            city=prospect.city or "",
+                            provider=cfg.ai_provider,
+                            model=cfg.ai_model,
+                            api_keys=api_keys,
+                        )
+                        if rep:
+                            if rep.get("name"):
+                                patch["name"] = rep["name"]
+                            if rep.get("industry"):
+                                patch["industry"] = rep["industry"]
+                    if patch:
+                        _old_name = prospect.name
+                        for _k, _v in patch.items():
+                            setattr(prospect, _k, _v)
+                        prospect.tags = list(prospect.tags or []) + [REPAIR_TAG]
+                        _persist_prospect(crm, prospect)
+                        _record_event(crm, prospect, {
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "kind": "record_repaired",
+                            "fields": sorted(patch.keys()),
+                            "before_name": (_old_name or "")[:120],
+                        })
+                        n_repaired += 1
+                        log(f"  🔧 fiche réparée ({', '.join(sorted(patch))}) "
+                            f"-> pas de brouillon fautif, le mail sera réécrit "
+                            f"au prochain passage avec la fiche propre")
+                        continue
+                except Exception as exc:
+                    log(f"  [WARN] réparation de fiche impossible ({exc}) "
+                        f"-> brouillon classique")
+
             # Délivrabilité : adresse devinée au-delà du quota -> brouillon.
             # Les confirmées sont passées d'abord (tri en amont), donc on
             # n'ampute jamais le volume des bonnes adresses.
@@ -1646,8 +1709,12 @@ def _run_ai_outreach(
     log({"type": "stage_done", "id": "write", "count": n_sent + n_pending,
          "message": f"{n_sent + n_pending} mail(s) rédigé(s)."})
     if review_enabled:
+        _msg_review = f"{n_reviewed} mail(s) relu(s) par la 2è IA."
+        if n_repaired:
+            _msg_review += (f" {n_repaired} fiche(s) réparée(s) par la 3e IA"
+                            f" (mail réécrit au prochain passage).")
         log({"type": "stage_done", "id": "review", "count": n_reviewed,
-             "message": f"{n_reviewed} mail(s) relu(s) par la 2è IA."})
+             "message": _msg_review})
     else:
         log({"type": "stage_done", "id": "review", "count": 0,
              "message": "Relecture désactivée."})
