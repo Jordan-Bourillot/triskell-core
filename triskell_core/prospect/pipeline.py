@@ -1188,6 +1188,26 @@ def _run_ai_outreach(
                     log({"type": "prospect_touched", "id": getattr(prospect, "id", ""),
                          "name": _prospect_label, "action": "skipped",
                          "reason": _why})
+                    # La fiche doit refleter la realite, sinon elle reste
+                    # "new"/"qualified", re-rentre dans la selection a CHAQUE
+                    # run et bouche le cap (famine constatee le 12/06/2026 :
+                    # 5 fiches "deja contacte" en tete de file -> les
+                    # prospects jamais traites derriere n'avaient JAMAIS
+                    # leur tour). Adresse deja cliente -> "won" (plus jamais
+                    # re-maile) ; adresse deja contactee -> "contacted" (le
+                    # recyclage des dormants pourra la reprendre plus tard).
+                    try:
+                        prospect.status = ("won"
+                                           if _rec.get("last_kind") == "client"
+                                           else "contacted")
+                        if _rec.get("last_ts"):
+                            prospect.last_contact_at = _rec["last_ts"]
+                        _persist_prospect(crm, prospect)
+                        log(f"  -> fiche marquee '{prospect.status}' "
+                            f"(ne bouchera plus la file)")
+                    except Exception as _mark_exc:
+                        log(f"  [WARN] marquage '{_why}' impossible "
+                            f"({_mark_exc}) — la fiche restera dans la file")
                     continue
 
             # Filtrage des modèles par catégorie de CE prospect : un
