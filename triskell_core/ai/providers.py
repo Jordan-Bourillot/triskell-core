@@ -79,7 +79,11 @@ def call_anthropic(prompt: str, model: str, api_key: str) -> str:
         },
         payload={
             "model": model,
-            "max_tokens": 4096,
+            # 8192 (et non 4096) : les réponses JSON longues (audit GEO :
+            # plusieurs blocs HTML de 200+ mots) étaient TRONQUÉES en plein
+            # JSON → « réponse non exploitable » (constaté le 13/06/2026).
+            # Anthropic facture à l'usage réel, pas au plafond.
+            "max_tokens": 8192,
             "messages": [{"role": "user", "content": prompt}],
         },
         provider="Anthropic",
