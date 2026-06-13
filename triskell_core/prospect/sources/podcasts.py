@@ -54,7 +54,7 @@ class ApplePodcastsAPI:
         max_results: int = 50,
         *,
         enrich_with_feed: bool = True,
-        feed_enrich_limit: int = 20,
+        feed_enrich_limit: int = 40,
     ) -> list[dict]:
         """Cherche des podcasts par mot-clé.
 

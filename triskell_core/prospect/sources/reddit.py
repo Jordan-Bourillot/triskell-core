@@ -80,11 +80,14 @@ class RedditAPI:
     # ------------------------------------------------------------------
     def search_subreddits(self, query: str, max_results: int = 25) -> list[dict]:
         """Cherche des subreddits par mot-clé."""
-        data = self._get("/subreddits/search.json", {
-            "q": query,
-            "limit": min(100, max_results),
-            "sort": "relevance",
-        })
+        try:
+            data = self._get("/subreddits/search.json", {
+                "q": query,
+                "limit": min(100, max_results),
+                "sort": "relevance",
+            })
+        except Exception:
+            return []
         results: list[dict] = []
         for child in data.get("data", {}).get("children", []):
             d = child.get("data", {})
@@ -107,11 +110,19 @@ class RedditAPI:
         return results
 
     def search_users(self, query: str, max_results: int = 25) -> list[dict]:
-        """Cherche des redditors par mot-clé."""
-        data = self._get("/users/search.json", {
-            "q": query,
-            "limit": min(100, max_results),
-        })
+        """Cherche des redditors par mot-clé.
+
+        Depuis 2023, Reddit a fermé l'endpoint public /users/search.json
+        (403 sans OAuth, vérifié le 14/06/2026). On dégrade proprement →
+        liste vide, sans faire planter la recherche multi-plateforme.
+        """
+        try:
+            data = self._get("/users/search.json", {
+                "q": query,
+                "limit": min(100, max_results),
+            })
+        except Exception:
+            return []
         results: list[dict] = []
         for child in data.get("data", {}).get("children", []):
             d = child.get("data", {})
