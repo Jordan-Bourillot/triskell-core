@@ -151,21 +151,32 @@ class YouTubeAPI:
         """N dernières vidéos d'une chaîne avec stats vue/like/commentaire."""
         if not self.available() or not channel_id:
             return []
-        search_data = self._get_with_rotation(
-            f"{self.BASE}/search",
-            {
-                "part": "id,snippet",
-                "channelId": channel_id,
-                "type": "video",
-                "order": "date",
-                "maxResults": max_results,
-            },
-            "search videos",
+        # On passe par la playlist « uploads » de la chaîne (1 unité de quota)
+        # au lieu de search.list (100 unités, et endpoint instable — erreur
+        # 403 accountDelegationForbidden observée le 13/06/2026). La playlist
+        # uploads contient toutes les vidéos, déjà du plus récent au plus ancien.
+        ch = self._get_with_rotation(
+            f"{self.BASE}/channels",
+            {"part": "contentDetails", "id": channel_id},
+            "uploads playlist",
+        )
+        ch_items = ch.get("items", [])
+        if not ch_items:
+            return []
+        uploads = (ch_items[0].get("contentDetails", {})
+                   .get("relatedPlaylists", {}).get("uploads", ""))
+        if not uploads:
+            return []
+        playlist = self._get_with_rotation(
+            f"{self.BASE}/playlistItems",
+            {"part": "contentDetails", "playlistId": uploads,
+             "maxResults": min(50, max_results)},
+            "playlist items",
         )
         video_ids = [
-            it["id"]["videoId"]
-            for it in search_data.get("items", [])
-            if it.get("id", {}).get("videoId")
+            it["contentDetails"]["videoId"]
+            for it in playlist.get("items", [])
+            if it.get("contentDetails", {}).get("videoId")
         ]
         if not video_ids:
             return []
