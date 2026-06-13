@@ -332,10 +332,17 @@ def _route_for_template_address(template_from: str,
     """Câblage modèle→adresse : routage de l'expéditeur exigé par le modèle.
 
     Un modèle de prospection peut exiger SON adresse d'envoi (champ
-    « Expéditeur (adresse) » du modèle). Règle absolue : si une adresse
-    est exigée, le mail ne part JAMAIS par une autre — au pire il devient
-    un brouillon. Fini les mails Pixel Pros signés d'une autre marque par
-    tirage au sort.
+    « Expéditeur (adresse) » du modèle). Règle absolue : un mail ne part
+    JAMAIS sous l'étiquette d'une AUTRE marque — au pire il devient un
+    brouillon.
+
+    Rotation même marque (multi-adresses) : la marque, c'est le DOMAINE.
+    Si plusieurs adresses du pool partagent le domaine de l'adresse exigée
+    (ex. contact@ + hello@ + bonjour@ chez pixel-pros.fr), le mail peut
+    partir par n'importe laquelle — toutes affichent « @pixel-pros.fr »,
+    donc l'esprit de la règle (jamais une autre marque) est respecté, et
+    on répartit le volume sur plusieurs boîtes (meilleure délivrabilité).
+    On tire au hasard parmi celles qui ont encore de la marge sur 24 h.
 
     Args:
         template_from        : adresse exigée par le modèle ("" = aucune).
@@ -345,24 +352,39 @@ def _route_for_template_address(template_from: str,
 
     Renvoie (decision, account_id) :
       - ("none", "")        : pas d'adresse exigée → tirage pool habituel.
-      - ("ok", account_id)  : compte trouvé, capacité 24 h restante.
-      - ("cap", account_id) : compte trouvé mais plafond 24 h atteint.
-      - ("missing", "")     : adresse exigée absente du pool d'envoi
+      - ("ok", account_id)  : compte trouvé (même marque), marge 24 h OK.
+      - ("cap", account_id) : marque trouvée mais toutes ses boîtes au
+                              plafond 24 h.
+      - ("missing", "")     : aucune adresse de cette marque dans le pool
                               (compte non déclaré ou SMTP incomplet).
     """
+    import random
     addr = (template_from or "").strip().lower()
     if not addr:
         return ("none", "")
-    aid = (pool_addr_to_account or {}).get(addr) or ""
-    if not aid:
+    domain = addr.split("@", 1)[1] if "@" in addr else ""
+    # Candidats = adresses du pool de la MÊME marque (même domaine).
+    # L'adresse exacte en fait partie ; on ne la privilégie pas, pour
+    # répartir réellement le volume.
+    candidates: list[str] = []
+    for pool_addr, aid in (pool_addr_to_account or {}).items():
+        a = (pool_addr or "").strip().lower()
+        if not aid:
+            continue
+        if a == addr or (domain and a.endswith("@" + domain)):
+            candidates.append(aid)
+    if not candidates:
         return ("missing", "")
-    try:
-        remaining = int((pool_remaining or {}).get(aid, 0))
-    except Exception:
-        remaining = 0
-    if remaining <= 0:
-        return ("cap", aid)
-    return ("ok", aid)
+    available = []
+    for aid in candidates:
+        try:
+            if int((pool_remaining or {}).get(aid, 0)) > 0:
+                available.append(aid)
+        except Exception:
+            pass
+    if not available:
+        return ("cap", candidates[0])
+    return ("ok", random.choice(available))
 
 
 # ---------------------------------------------------------------------------
@@ -1615,11 +1637,23 @@ def _run_ai_outreach(
                     _load_smtp_config, prospection_headers, send_email,
                 )
                 smtp_cfg = sender_smtp_cfg if sender_smtp_cfg else _load_smtp_config()
+                _to_addr = prospect.emails[0]
+                _pid = str(getattr(prospect, "id", "") or "")
+                # Pied de désinscription cliquable (texte + HTML), lien signé
+                # propre au destinataire. Sans casser si le module est absent.
+                _send_body, _send_html = body, body_html
+                try:
+                    from triskell_command.integrations import unsubscribe as _unsub
+                    _send_body, _send_html = _unsub.inject_footer(
+                        body, body_html, _to_addr, _pid)
+                except Exception as _u_exc:
+                    logger.debug("inject_footer KO: %s", _u_exc)
                 msg_id = send_email(
-                    smtp_cfg, to=prospect.emails[0],
-                    subject=subject, body=body, body_html=body_html,
+                    smtp_cfg, to=_to_addr,
+                    subject=subject, body=_send_body, body_html=_send_html,
                     custom_headers=prospection_headers(
-                        (smtp_cfg or {}).get("from_email", "")),
+                        (smtp_cfg or {}).get("from_email", ""),
+                        to_email=_to_addr, prospect_id=_pid),
                 )
                 if _email_is_guessed(prospect):
                     _guessed_sent += 1

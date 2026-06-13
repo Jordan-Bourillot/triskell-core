@@ -93,22 +93,34 @@ def _bump_today_count(by: int = 1) -> int:
 # En-têtes de prospection (désinscription)
 # ---------------------------------------------------------------------------
 def prospection_headers(from_email: str,
+                        to_email: str = "",
+                        prospect_id: str = "",
                         extra: dict | None = None) -> dict:
     """En-têtes à poser sur tout mail de PROSPECTION automatisée.
 
-    `List-Unsubscribe` (mailto) : les clients mail (Gmail, Yahoo…) affichent
-    alors leur bouton natif « Se désabonner ». Le destinataire qui clique
-    envoie un mail avec le sujet "unsubscribe" → le lecteur de boîte le
-    classe en désinscription → statut 'unsubscribed' définitif sur le
-    prospect. Bon pour la conformité ET pour la réputation d'envoi (un
-    désabonnement propre vaut mille fois mieux qu'un signalement spam).
+    Si l'adresse destinataire (`to_email`) est fournie, on pose la
+    désinscription en 1 clic : `List-Unsubscribe` avec un lien HTTPS signé
+    + le mailto en repli, et `List-Unsubscribe-Post` (RFC 8058) → Gmail /
+    Yahoo affichent leur bouton « Se désabonner » qui désinscrit en un clic.
+    Sans destinataire (ou si le module web n'est pas chargé), on retombe
+    sur le mailto seul — comportement historique, jamais de lien invalide.
 
     À NE PAS poser sur les mails transactionnels (factures, livraisons)
     ni sur la correspondance individuelle.
     """
     headers = dict(extra or {})
     addr = (from_email or "").strip()
-    if addr and "List-Unsubscribe" not in headers:
+    if "List-Unsubscribe" in headers:
+        return headers
+    to = (to_email or "").strip()
+    if to:
+        try:
+            from triskell_command.integrations import unsubscribe as _unsub
+            headers.update(_unsub.headers_for(addr, to, prospect_id))
+            return headers
+        except Exception:
+            pass  # module web indispo (core utilisé seul) → repli mailto
+    if addr:
         headers["List-Unsubscribe"] = (
             f"<mailto:{addr}?subject=unsubscribe>"
         )
