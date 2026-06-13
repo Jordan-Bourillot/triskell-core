@@ -89,6 +89,13 @@ FAKE_DOMAINS: frozenset[str] = frozenset({
     "yourwebsite.com", "mywebsite.com", "mysite.com", "placeholder.com",
     "votredomaine.com", "votre-domaine.com", "votredomaine.fr",
     "mondomaine.com", "mon-domaine.com", "mondomaine.fr",
+    # Placeholder archi-classique « abc@xyz.com » (audit du 13/06/2026).
+    "xyz.com",
+    # Médiateurs de la consommation : leurs adresses traînent dans les
+    # mentions légales de tous les sites marchands — JAMAIS des prospects
+    # (« litiges@cm2c.net » aspiré en vrai le 13/06/2026).
+    "cm2c.net", "medicys.fr", "mediation-conso.fr",
+    "cnpm-mediation-consommation.eu",
 })
 
 # Local-parts qui sont JAMAIS des emails légitimes : presque toujours
@@ -97,6 +104,8 @@ SUSPICIOUS_LOCAL_PARTS: frozenset[str] = frozenset({
     "only", "online", "more",
     # Placeholders : « votre@… » / « your@… » ne sont jamais de vrais comptes.
     "votre", "your",
+    # Adresses techniques : on ne prospecte jamais ces boîtes (audit 13/06).
+    "no-reply", "noreply", "postmaster", "mailer-daemon",
 })
 
 # Local-parts AMBIGUS : légitimes en soi (info@vraie-boite.com existe), mais
@@ -272,6 +281,15 @@ def is_fake_domain(domain: str) -> bool:
     return d in FAKE_DOMAINS
 
 
+# Suffixes de domaines d'INFRASTRUCTURE : des identifiants techniques que
+# les extracteurs prennent pour des emails (vu en vrai le 13/06/2026 :
+# « 14d5…@o45….ingest.us.sentry.io » dans la base). Jamais des prospects.
+TECHNICAL_DOMAIN_SUFFIXES: tuple[str, ...] = (
+    ".sentry.io", ".amazonses.com", ".sendgrid.net", ".mailgun.org",
+    ".cloudfront.net", ".herokuapp.com", ".execute-api.amazonaws.com",
+)
+
+
 def clean_email(email: str) -> str | None:
     """Nettoie un email :
     - normalise le domaine (lowercase, retire www., aplatit sous-domaine connu),
@@ -318,6 +336,12 @@ def clean_email(email: str) -> str | None:
     # 3bis. Terminaison invalide (texte soudé au .com, faute de frappe…) →
     # rejet. Sans ça, "x@gmail.comwebmaster" passait.
     if not _tld_is_plausible(norm):
+        return None
+
+    # 3ter. Domaines d'infrastructure (sentry, passerelles mail…) :
+    # des identifiants techniques, jamais des boîtes de prospects.
+    if any(norm.endswith(s) or domain.endswith(s)
+           for s in TECHNICAL_DOMAIN_SUFFIXES):
         return None
 
     # 4. Local-part ambigu (ex: "info") légitime sauf si on a déjà un autre
