@@ -24,6 +24,7 @@ from triskell_core.prospect.enrichers.email_filter import (
     FAKE_DOMAINS,
     SUSPICIOUS_LOCAL_PARTS,
     clean_email,
+    guess_email_from_url,
     is_fake_domain,
 )
 
@@ -150,6 +151,40 @@ def test_rejette_marketplace_fleuristes():
     """contact@sessile.fr (marketplace) n'est pas le mail du commerçant."""
     assert clean_email("contact@sessile.fr") is None
     assert clean_email("contact@interflora.fr") is None
+
+
+# ---------------------------------------------------------------------------
+# Hébergeurs & raccourcisseurs (audit prospection du 13/06/2026)
+# ---------------------------------------------------------------------------
+
+def test_rejette_hebergeurs_et_registrars():
+    """Le mail commercial d'un hébergeur/registrar n'est JAMAIS celui du
+    prospect (sales@scalahosting.com aspiré sur une boulangerie, 13/06/2026)."""
+    for d in ("scalahosting.com", "godaddy.com", "hostgator.com",
+              "ovh.com", "ionos.fr", "hostinger.com", "namecheap.com",
+              "lws.fr", "planethoster.net"):
+        assert clean_email(f"sales@{d}") is None, f"sales@{d} aurait dû sauter"
+        assert clean_email(f"support@{d}") is None
+
+
+def test_rejette_raccourcisseurs_de_liens():
+    """Un lien raccourci pris pour un site → contact@<raccourci> rejeté
+    (contact@amzn.to aspiré sur un youtubeur, 13/06/2026)."""
+    for d in ("amzn.to", "a.co", "bit.ly", "cutt.ly", "t.co",
+              "wa.me", "discord.gg", "lnkd.in"):
+        assert clean_email(f"contact@{d}") is None, f"contact@{d} aurait dû sauter"
+
+
+def test_guess_email_refuse_lien_affilie():
+    """guess_email_from_url ne doit JAMAIS inventer un mail sur un raccourci."""
+    assert guess_email_from_url("https://amzn.to/4kyQyQz", verify_mx=False) is None
+    assert guess_email_from_url("https://bit.ly/abc", verify_mx=False) is None
+
+
+def test_guess_email_accepte_vrai_site():
+    """Sur un vrai domaine, guess_email_from_url renvoie contact@domaine."""
+    assert (guess_email_from_url("https://promessedefleurs.com", verify_mx=False)
+            == "contact@promessedefleurs.com")
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ from typing import Iterator
 import requests
 
 from ..core.prospect import Prospect, Source
+from ..naf_labels import naf_label
 
 log = logging.getLogger(__name__)
 
@@ -188,7 +189,12 @@ def _convert(item: dict) -> Prospect | None:
 
     # NAF
     activite = item.get("activite_principale") or ""
-    libelle_activite = item.get("libelle_activite_principale") or ""
+    # L'API ne renvoie pas le libellé du métier : on le traduit nous-mêmes
+    # (sinon industry restait vide). Repli : libellé de section, puis code.
+    libelle_activite = (
+        item.get("libelle_activite_principale")
+        or naf_label(activite, item.get("section_activite_principale") or "")
+    )
 
     return Prospect(
         name=name,

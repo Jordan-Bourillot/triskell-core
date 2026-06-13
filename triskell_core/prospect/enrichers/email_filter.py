@@ -31,8 +31,16 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     # No-code / bio links
     "base44.app", "linktr.ee", "bio.link", "carrd.co", "beacons.ai",
     "linkin.bio", "later.com", "lnk.bio", "milkshake.app",
-    # Raccourcisseurs / marketplaces
+    # Raccourcisseurs de liens : un « site » qui pointe vers un raccourci
+    # n'est pas le domaine du prospect. Inventer contact@<raccourci> écrit au
+    # service du raccourcisseur. (contact@amzn.to aspiré en vrai sur un
+    # youtubeur le 13/06/2026 : le lien affilié Amazon pris pour son site.)
     "bit.ly", "tinyurl.com", "rb.gy", "is.gd",
+    "cutt.ly", "shorturl.at", "rebrand.ly", "ow.ly", "buff.ly",
+    "t.co", "goo.gl", "dlvr.it", "ift.tt", "snip.ly", "lnkd.in",
+    "amzn.to", "amzn.eu", "amzn.asia", "a.co",
+    "wa.me", "discord.gg", "fb.me", "fb.watch",
+    # Marketplaces / liens d'affiliation
     "envato.market", "amazon.com", "amazon.fr", "amazon.de", "amazon.co.uk",
     "etsy.com",
     # Google ecosystem
@@ -50,8 +58,19 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     # d'erreur/parking des sites clients — jamais le mail du prospect.
     # (Observé en vrai le 10/06/2026 sur un plombier de Saint-Erblon.)
     "ovhcloud.com", "ovh.com", "ovh.net", "gandi.net",
-    "ionos.fr", "ionos.com", "o2switch.fr", "infomaniak.com",
+    "ionos.fr", "ionos.com", "1and1.com", "1und1.de",
+    "o2switch.fr", "infomaniak.com", "infomaniak.ch",
     "hostinger.com", "hostinger.fr",
+    # Hébergeurs / registrars supplémentaires : leur mail commercial
+    # (sales@scalahosting.com, support@godaddy.com…) traîne dans le pied de
+    # page ou les pages de parking des sites clients — jamais le mail du
+    # prospect. (sales@scalahosting.com aspiré sur une boulangerie, 13/06/2026.)
+    "scalahosting.com", "godaddy.com", "hostgator.com", "bluehost.com",
+    "siteground.com", "dreamhost.com", "namecheap.com", "name.com",
+    "a2hosting.com", "hostpapa.com", "kinsta.com", "wpengine.com",
+    "cloudways.com", "planethoster.net", "planethoster.com",
+    "lws.fr", "amen.fr", "nuxit.com", "hosteur.com", "ex2.com",
+    "hetzner.com", "contabo.com", "scaleway.com", "digitalocean.com",
     # Marketplaces / réseaux qui hébergent des mini-sites de commerçants :
     # le mail contact@<marketplace> est celui du support, PAS du commerçant.
     "sessile.fr", "florajet.com", "interflora.fr", "aquarelle.com",

@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Callable
 
 from .core.crm import CONFIG_FILE
-from .enrichers.email_filter import filter_emails, guess_email_from_url
+from .enrichers.email_filter import (
+    filter_emails, guess_email_from_url, is_platform_domain, normalize_domain)
 from .enrichers.linktree import LinktreeFollower, is_hub
 from .enrichers.monetization import is_social_url
 from .enrichers.web import WebEnricher
@@ -188,6 +189,22 @@ def _infer_standard_emails(url: str) -> list[str]:
     """
     guess = guess_email_from_url(url)
     return [guess] if guess else []
+
+
+def _url_host_is_platform(url: str) -> bool:
+    """Vrai si l'URL pointe vers une plateforme / raccourcisseur / hébergeur
+    (donc PAS le vrai site du créateur) — ex. un lien d'affiliation amzn.to
+    laissé dans la bio. Évite de deviner contact@amzn.to ou d'enregistrer un
+    lien affilié comme « site ». (Observé en vrai le 13/06/2026.)"""
+    if not url:
+        return True
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url if url.startswith("http") else "https://" + url)
+        host = parsed.netloc or parsed.path
+    except Exception:
+        return False
+    return is_platform_domain(normalize_domain(host))
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +466,9 @@ def run_creators_pipeline(
             if p.get("emails"):
                 continue
             urls = p.get("urls_in_bio") or []
-            url = next((u for u in urls if u and not is_social_url(u)), "")
+            url = next((u for u in urls
+                        if u and not is_social_url(u)
+                        and not _url_host_is_platform(u)), "")
             if not url:
                 continue
             try:
