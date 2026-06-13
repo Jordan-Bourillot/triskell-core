@@ -158,6 +158,109 @@ NAF_LABELS: dict[str, str] = {
 }
 
 
+# Mots-clés métier par code NAF : au moins UN doit apparaître sur le site
+# d'une entreprise réellement de ce métier. Sert de garde-fou de pertinence
+# côté Chasseur (une « SARL FLEUR'IMMO » mal classée fleuriste au registre,
+# mais dont le site parle d'immobilier, sera écartée). Tous en minuscules,
+# comparés en sous-chaîne. Volontairement GÉNÉREUX (synonymes) pour ne jamais
+# écarter un vrai prospect. Un métier ABSENT de cette table = aucun garde-fou.
+SECTOR_KEYWORDS: dict[str, frozenset[str]] = {
+    "47.76Z": frozenset({"fleuriste", "fleurs", "bouquet", "floral",
+                          "fleuri", "orchid", "compositions"}),
+    "10.71C": frozenset({"boulanger", "pâtiss", "patiss", "pain",
+                         "viennoiser", "baguette", "fournil"}),
+    "10.71D": frozenset({"pâtiss", "patiss", "gâteau", "gateau", "macaron",
+                         "chocolat"}),
+    "47.24Z": frozenset({"boulanger", "pâtiss", "patiss", "pain", "fournil"}),
+    "47.22Z": frozenset({"boucher", "charcuter", "viande", "traiteur"}),
+    "47.23Z": frozenset({"poissonner", "poisson", "fruits de mer", "marée",
+                         "crustacé"}),
+    "47.21Z": frozenset({"primeur", "fruits", "légumes", "legumes",
+                         "maraîch", "maraich"}),
+    "47.25Z": frozenset({"caviste", "vins", "vin ", "spiritueux", "champagne"}),
+    "47.73Z": frozenset({"pharmacie", "pharmacien", "médicament",
+                         "ordonnance", "parapharmacie"}),
+    "47.75Z": frozenset({"parfum", "cosmétique", "cosmetique", "beauté",
+                         "maquillage"}),
+    "43.21A": frozenset({"électric", "electric", "domotique", "luminaire",
+                         "installation électrique"}),
+    "43.22A": frozenset({"plomb", "sanitaire", "chauffage", "chaudièr",
+                         "chaudier", "fuite", "salle de bain"}),
+    "43.22B": frozenset({"chauffage", "climatis", "pompe à chaleur",
+                         "chaudièr", "chaudier", "thermique"}),
+    "43.31Z": frozenset({"plaquiste", "plâtre", "platre", "placo", "cloison",
+                         "isolation", "plâtrerie", "platrerie"}),
+    "43.32A": frozenset({"menuis", "fenêtre", "fenetre", "porte", "volet",
+                         "escalier", "agencement", "dressing"}),
+    "43.33Z": frozenset({"carrel", "faïence", "faience", "mosaïque",
+                         "mosaique", "revêtement", "revetement"}),
+    "43.34Z": frozenset({"peinture", "peintre", "ravalement", "enduit",
+                         "décoration", "decoration"}),
+    "43.39Z": frozenset({"rénovation", "renovation", "finition", "décoration",
+                         "decoration"}),
+    "43.91B": frozenset({"couvreur", "couverture", "toiture", "toit",
+                         "zinguerie", "charpente"}),
+    "43.99C": frozenset({"maçon", "macon", "maçonnerie", "maconnerie",
+                         "gros œuvre", "gros oeuvre", "dalle", "parpaing",
+                         "fondation"}),
+    "41.20A": frozenset({"construction", "maison", "constructeur",
+                         "bâtiment", "batiment", "rénovation", "renovation"}),
+    "41.20B": frozenset({"construction", "bâtiment", "batiment", "chantier"}),
+    "71.11Z": frozenset({"architect", "maîtrise d'œuvre", "permis de construire",
+                         "plans"}),
+    "81.30Z": frozenset({"paysag", "jardin", "espaces verts", "élagage",
+                         "elagage", "gazon", "plantation", "tonte"}),
+    "56.10A": frozenset({"restaurant", "menu", "carte", "réserv", "reserv",
+                         "brasserie", "cuisine", "midi", "plat"}),
+    "56.10B": frozenset({"restaurant", "menu", "self", "libre-service",
+                         "cuisine"}),
+    "56.10C": frozenset({"restaurant", "burger", "pizza", "kebab", "tacos",
+                         "snack", "fast", "à emporter", "a emporter"}),
+    "56.21Z": frozenset({"traiteur", "réception", "reception", "buffet",
+                         "événement", "evenement", "cocktail"}),
+    "56.30Z": frozenset({"bar", "brasserie", "cocktail", "bière", "biere",
+                         "pub", "apér"}),
+    "55.10Z": frozenset({"hôtel", "hotel", "chambre", "réservation",
+                         "reservation", "séjour", "sejour", "nuitée"}),
+    "96.02A": frozenset({"coiff", "cheveux", "brushing", "barbier",
+                         "coloration", "salon"}),
+    "96.02B": frozenset({"institut", "beauté", "beaute", "esthétic",
+                         "esthetic", "épilation", "epilation", "manucure",
+                         "onglerie", "soin"}),
+    "96.04Z": frozenset({"spa", "massage", "bien-être", "bien être",
+                         "bien etre", "modelage", "sauna", "hammam",
+                         "détente", "detente"}),
+    "93.13Z": frozenset({"salle de sport", "fitness", "musculation",
+                         "coach", "remise en forme", "cours collectifs"}),
+    "74.20Z": frozenset({"photo", "photograph", "shooting", "reportage",
+                         "portrait"}),
+    "45.20A": frozenset({"garage", "automobile", "mécanique", "mecanique",
+                         "réparation", "reparation", "vidange", "pneu",
+                         "carrosserie", "entretien"}),
+    "45.11Z": frozenset({"voiture", "véhicule", "vehicule", "occasion",
+                         "concession", "automobile"}),
+    "86.23Z": frozenset({"dentaire", "dentiste", "implant", "orthodont",
+                         "couronne"}),
+    "86.21Z": frozenset({"médecin", "medecin", "docteur", "consultation",
+                         "cabinet médical", "généraliste", "generaliste"}),
+    "86.90E": frozenset({"kinésithérap", "kinesitherap", "kiné", "kine",
+                         "rééducation", "reeducation", "ostéo", "osteo"}),
+    "75.00Z": frozenset({"vétérinaire", "veterinaire", "clinique",
+                         "animaux", "animal"}),
+    "70.22Z": frozenset({"conseil", "consulting", "accompagnement",
+                         "stratégie", "strategie", "gestion", "coaching"}),
+    "69.20Z": frozenset({"comptab", "expert-comptable", "expertise comptable",
+                         "fiscal", "bilan"}),
+    "68.31Z": frozenset({"immobilier", "immo", "agence", "vente", "location",
+                         "appartement", "maison à vendre", "estimation"}),
+}
+
+
+def sector_keywords(code: str) -> frozenset[str]:
+    """Mots-clés métier pour un code NAF (vide si métier non couvert)."""
+    return SECTOR_KEYWORDS.get(_canon(code), frozenset())
+
+
 def _canon(code: str) -> str:
     """Normalise un code NAF vers la forme pointée « 47.76Z »."""
     if not code:
@@ -183,4 +286,5 @@ def naf_label(code: str, section: str = "") -> str:
     return code or ""
 
 
-__all__ = ["SECTION_LABELS", "NAF_LABELS", "naf_label"]
+__all__ = ["SECTION_LABELS", "NAF_LABELS", "naf_label",
+           "SECTOR_KEYWORDS", "sector_keywords"]

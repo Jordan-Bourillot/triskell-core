@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from triskell_core.prospect.naf_labels import _canon, naf_label
+from triskell_core.prospect.naf_labels import _canon, naf_label, sector_keywords
 
 
 def test_code_connu_fleuriste():
@@ -62,6 +62,22 @@ def test_canon():
     assert _canon("47.76z") == "47.76Z"
     assert _canon(" 4321A ") == "43.21A"
     assert _canon("") == ""
+
+
+def test_sector_keywords_metiers_courants():
+    """Les métiers couverts ont bien des mots-clés (garde-fou pertinence)."""
+    assert "fleurs" in sector_keywords("47.76Z")
+    assert "bouquet" in sector_keywords("47.76Z")
+    assert "plomb" in sector_keywords("43.22A")
+    assert "coiff" in sector_keywords("96.02A")
+    # tolère la forme sans point
+    assert sector_keywords("4776Z") == sector_keywords("47.76Z")
+
+
+def test_sector_keywords_inconnu_vide():
+    """Métier non couvert → aucun garde-fou (on n'écarte jamais un prospect)."""
+    assert sector_keywords("99.99Z") == frozenset()
+    assert sector_keywords("") == frozenset()
 
 
 if __name__ == "__main__":
