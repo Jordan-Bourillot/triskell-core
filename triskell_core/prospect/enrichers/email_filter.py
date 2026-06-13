@@ -74,6 +74,8 @@ PLATFORM_DOMAINS: frozenset[str] = frozenset({
     # Marketplaces / réseaux qui hébergent des mini-sites de commerçants :
     # le mail contact@<marketplace> est celui du support, PAS du commerçant.
     "sessile.fr", "florajet.com", "interflora.fr", "aquarelle.com",
+    "fleuristes-et-fleurs.com", "artisansfleuristesdefrance.com",
+    "monfleuriste.fr", "lebouquetnantais.fr",
     # Vente / parking de domaines : quand le site d'un prospect est expiré,
     # la page de parking affiche le mail de la régie (service@atom.com,
     # info@sedo.com…) — jamais celui du prospect. Observé en vrai le

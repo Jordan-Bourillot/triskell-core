@@ -151,6 +151,10 @@ def test_rejette_marketplace_fleuristes():
     """contact@sessile.fr (marketplace) n'est pas le mail du commerçant."""
     assert clean_email("contact@sessile.fr") is None
     assert clean_email("contact@interflora.fr") is None
+    # Annuaires/réseaux de fleuristes ajoutés le 14/06/2026 (jamais le
+    # mail de la boutique elle-même).
+    assert clean_email("contact@fleuristes-et-fleurs.com") is None
+    assert clean_email("contact@artisansfleuristesdefrance.com") is None
 
 
 # ---------------------------------------------------------------------------

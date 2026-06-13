@@ -72,13 +72,17 @@ class GitHubAPI:
             data = get_json(SEARCH_URL, params=params, headers=self._headers(),
                             max_retries=2)
         except SourceHttpError as e:
-            # Si rate limit sans token : explique clairement
+            # Rate limit (403, fréquent sans token) ou autre erreur HTTP :
+            # on n'interrompt PAS toute la recherche multi-plateforme — on
+            # journalise et on renvoie une liste vide. (Avant : l'exception
+            # ici faisait planter la recherche entière dès que GitHub était
+            # coché sans token configuré.)
             if e.status == 403:
-                raise RuntimeError(
-                    "GitHub a échoué (rate limit). Configure un token GitHub "
-                    "dans Réglages pour passer à 5000 req/h."
-                ) from e
-            raise RuntimeError(f"GitHub a échoué : {e}") from e
+                log.warning("GitHub : rate limit atteint (60 req/h sans token). "
+                            "Ajoute un token GitHub dans les Réglages (5000 req/h).")
+            else:
+                log.warning("GitHub a échoué : %s", e)
+            return []
         if not isinstance(data, dict):
             return []
 
