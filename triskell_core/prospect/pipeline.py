@@ -1242,6 +1242,18 @@ def _run_ai_outreach(
                 t for t in templates_for_picking
                 if (t.get("audience") or "creator").lower() == prospect_audience
             ] if use_templates else []
+            # Affinage 'pro' : choisir la catégorie (commerce / artisan /
+            # cabinet) selon le métier, pour ne pas envoyer un mail pensé
+            # pour un commerce à un plombier. Repli sur toute l'audience si
+            # le métier n'est pas classable (jamais de trou).
+            if (use_templates and prospect_audience == "pro"
+                    and templates_for_this_prospect):
+                _cat = _pro_category(prospect.industry or "")
+                if _cat:
+                    _by_cat = [t for t in templates_for_this_prospect
+                               if _cat in (t.get("key") or "").lower()]
+                    if _by_cat:
+                        templates_for_this_prospect = _by_cat
 
             _html_is_custom = False
             if use_templates and templates_for_this_prospect:
@@ -1828,6 +1840,48 @@ def _detect_audience(prospect: Prospect, cfg: PipelineConfig) -> str:
         if name in creator_markers or name.startswith("obelisk"):
             return "creator"
     return "pro"
+
+
+def _pro_category(secteur: str) -> str:
+    """Classe un métier 'pro' en 'commerce' / 'artisan' / 'cabinet' pour choisir
+    le bon modèle (un plombier ne doit pas recevoir le mail d'un fleuriste).
+
+    Renvoie "" si le métier n'est pas reconnu → l'appelant garde alors TOUS les
+    modèles 'pro' (jamais de trou, comportement historique).
+    """
+    import unicodedata
+    s = "".join(c for c in unicodedata.normalize("NFD", (secteur or "").lower())
+                if unicodedata.category(c) != "Mn")
+    artisan = ("plomb", "chauffag", "electric", "peintr", "carrel", "faienc",
+               "macon", "menuis", "ebenist", "charpent", "plaquist", "placo",
+               "platr", "paysag", "jardin", "elagag", "espaces vert", "couvr",
+               "serrur", "terrass", "renov", "batiment", "travaux", "artisan",
+               "isolation", "garage", "mecanic", "carross", "vitrier", "metall",
+               "ferronn", "facad", "ravalement", "cuisiniste", "store", "portail",
+               "cloture", "etancheit", "demolition")
+    cabinet = ("avocat", "notaire", "huissier", "comptab", "medecin", "dentist",
+               "dentaire", "kine", "osteo", "infirmier", "podolog", "orthophon",
+               "psycholog", "psychiatr", "veterin", "cabinet", "architect",
+               "geometre", "assurance", "courtier", "therapeut", "expert")
+    commerce = ("fleur", "patiss", "boulang", "chocolat", "confis", "cake",
+                "restaur", "pizz", "brasser", "creper", "bistro", "traiteur",
+                "snack", "kebab", "cafe", "coiff", "barbier", "esthet", "beaut",
+                "ongle", "manucur", "maquill", "institut", "cils", "massag", "spa",
+                "bien-etre", "bien etre", "sophro", "naturopath", "reflexo", "yoga",
+                "hypno", "coach", "photograph", "videast", "tatou", "tattoo",
+                "piercing", "toilettag", "canin", "pension", "dressage", "boutique",
+                "magasin", "epicerie", "boucher", "primeur", "caviste", "opticien",
+                "bijou", "pressing", "hotel", "gite", "fromager", "poissonn")
+    for k in artisan:
+        if k in s:
+            return "artisan"
+    for k in cabinet:
+        if k in s:
+            return "cabinet"
+    for k in commerce:
+        if k in s:
+            return "commerce"
+    return ""
 
 
 def _humanize_email_source(source: str, context: str = "") -> str:
