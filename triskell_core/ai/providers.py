@@ -155,6 +155,27 @@ def call_xai(prompt: str, model: str, api_key: str) -> str:
         raise ProviderError(f"xAI: format de réponse inattendu ({exc})") from exc
 
 
+def call_deepseek(prompt: str, model: str, api_key: str) -> str:
+    # API DeepSeek : format compatible OpenAI (mêmes champs messages/choices).
+    _validate(prompt, api_key, "DeepSeek")
+    data = _post(
+        "https://api.deepseek.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        payload={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+        provider="DeepSeek",
+    )
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ProviderError(f"DeepSeek: format de réponse inattendu ({exc})") from exc
+
+
 PROVIDERS: dict[str, dict] = {
     "anthropic": {
         "label": "Anthropic (Claude)",
@@ -200,6 +221,12 @@ PROVIDERS: dict[str, dict] = {
         "caller": call_xai,
         "models": ["grok-2-latest", "grok-beta"],
     },
+    "deepseek": {
+        "label": "DeepSeek",
+        "key_field": "deepseek",
+        "caller": call_deepseek,
+        "models": ["deepseek-chat", "deepseek-reasoner"],
+    },
 }
 
 
@@ -213,3 +240,108 @@ def send_to_provider(
     caller: Callable[[str, str, str], str] = info["caller"]
     key = api_keys.get(info["key_field"], "")
     return caller(prompt, model, key)
+
+
+# ---------------------------------------------------------------------------
+# Bascule automatique entre IA (fallback)
+# ---------------------------------------------------------------------------
+# Quand l'IA configurée tombe en panne (plus de crédit, coupure réseau,
+# surcharge…), on ne veut pas bloquer toute la chaîne : on essaie les autres
+# IA dont une clé est enregistrée, par ordre de priorité, jusqu'à ce qu'une
+# réponde. Sert surtout à la 2e IA de relecture (quality_reviewer), pour qu'une
+# simple panne de crédit ne fige plus la prospection en silence.
+
+# Ordre de priorité par défaut, de la « meilleure » à la moins bonne pour du
+# jugement / de la rédaction de texte. L'IA explicitement choisie dans les
+# réglages passe TOUJOURS en premier ; ce classement ne sert qu'aux secours.
+DEFAULT_PRIORITY: list[str] = ["anthropic", "openai", "google", "deepseek", "mistral", "xai"]
+
+
+class AllProvidersFailed(ProviderError):
+    """Aucune IA disponible n'a pu répondre (toutes en panne ou sans clé)."""
+
+    def __init__(self, errors: dict[str, str]):
+        self.errors = dict(errors or {})
+        if self.errors:
+            detail = " | ".join(f"{p}: {e}" for p, e in self.errors.items())
+        else:
+            detail = "aucune clé IA enregistrée"
+        super().__init__(f"Aucune IA disponible — {detail}")
+
+
+def available_providers(api_keys: dict[str, str]) -> list[str]:
+    """Providers pour lesquels une clé non vide est enregistrée, classés par
+    priorité par défaut."""
+    keys = api_keys or {}
+    return [
+        p for p in DEFAULT_PRIORITY
+        if (keys.get(PROVIDERS[p]["key_field"], "") or "").strip()
+    ]
+
+
+def default_model_for(provider_id: str) -> str:
+    """Meilleur modèle par défaut (1er de la liste) d'un provider."""
+    info = PROVIDERS.get(provider_id)
+    if not info or not info.get("models"):
+        return ""
+    return info["models"][0]
+
+
+def send_with_fallback(
+    preferred_provider: str,
+    preferred_model: str,
+    prompt: str,
+    api_keys: dict[str, str],
+    *,
+    priority: list[str] | None = None,
+) -> tuple[str, str, str]:
+    """Essaie l'IA préférée, puis bascule sur les autres IA enregistrées par
+    ordre de priorité jusqu'à ce qu'une réponde.
+
+    Renvoie (texte_reponse, provider_utilise, modele_utilise).
+    Lève AllProvidersFailed si AUCUNE IA n'a pu répondre (toutes en panne ou
+    aucune clé enregistrée).
+
+    - L'IA préférée garde le modèle demandé (preferred_model).
+    - Les IA de secours utilisent leur meilleur modèle par défaut
+      (preferred_model est un nom de modèle propre à l'IA préférée, il ne
+      veut rien dire ailleurs).
+    - Une IA sans clé enregistrée est sautée en silence (ce n'est pas une
+      panne) ; seul un vrai échec d'appel est mémorisé dans le rapport.
+    """
+    keys = api_keys or {}
+    order: list[str] = []
+    if preferred_provider in PROVIDERS:
+        order.append(preferred_provider)
+    for p in (priority or DEFAULT_PRIORITY):
+        if p in PROVIDERS and p not in order:
+            order.append(p)
+
+    errors: dict[str, str] = {}
+    for prov in order:
+        key = (keys.get(PROVIDERS[prov]["key_field"], "") or "").strip()
+        if not key:
+            continue  # pas de clé pour cette IA → on saute (ce n'est pas une panne)
+        if prov == preferred_provider and (preferred_model or "").strip():
+            model = preferred_model
+        else:
+            model = default_model_for(prov)
+        try:
+            text = send_to_provider(prov, model, prompt, keys)
+        except ProviderError as exc:
+            errors[prov] = str(exc)
+            logger.warning("send_with_fallback: %s a échoué (%s)", prov, exc)
+            continue
+        except Exception as exc:  # robustesse maximale : un provider exotique
+            errors[prov] = f"erreur inattendue ({exc})"
+            logger.warning("send_with_fallback: %s erreur inattendue (%s)", prov, exc)
+            continue
+        if text and text.strip():
+            if prov != preferred_provider:
+                logger.info(
+                    "send_with_fallback: bascule sur '%s' (préféré '%s' indisponible)",
+                    prov, preferred_provider,
+                )
+            return text, prov, model
+        errors[prov] = "réponse vide"
+    raise AllProvidersFailed(errors)

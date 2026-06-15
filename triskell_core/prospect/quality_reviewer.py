@@ -96,6 +96,7 @@ def review_email(
         logger.warning("quality_reviewer: providers IA indisponibles (%s)", exc)
         return {"score": 0, "verdict": "draft",
                 "comment": "providers IA indisponibles",
+                "engine_down": True,
                 "body_revised": "", "raw": ""}
 
     if (audience or "").strip().lower() == "creator":
@@ -115,15 +116,35 @@ def review_email(
     )
 
     raw = ""
+    used_provider = provider
     try:
-        raw = ai_providers.send_to_provider(provider, model, prompt, api_keys) or ""
-    except Exception as exc:
+        # Bascule automatique : si l'IA préférée est en panne (plus de crédit,
+        # coupure…), on essaie les autres IA enregistrées par ordre de priorité.
+        raw, used_provider, _used_model = ai_providers.send_with_fallback(
+            provider, model, prompt, api_keys)
+        raw = raw or ""
+    except ai_providers.AllProvidersFailed as exc:
+        # AUCUNE IA n'a pu relire. On NE met PAS un faux « 0/10 » : on signale
+        # une panne (engine_down) pour que l'écran l'affiche comme telle. Le
+        # mail reste en brouillon par sécurité (l'humain a le dernier mot).
+        logger.warning("quality_reviewer: aucune IA disponible (%s)", exc)
+        return {"score": 0, "verdict": "draft",
+                "comment": ("Le correcteur (2e IA) n'a pas pu relire : aucune IA "
+                            "disponible (plus de crédit ou coupure). Mail gardé en "
+                            "brouillon par sécurité — recharge tes crédits ou "
+                            "ajoute une autre IA dans Réglages."),
+                "engine_down": True,
+                "body_revised": "", "raw": ""}
+    except Exception as exc:  # garde-fou : ne jamais laisser remonter
         logger.warning("quality_reviewer: appel IA a echoue (%s)", exc)
         return {"score": 0, "verdict": "draft",
                 "comment": f"reviewer plante : {exc}",
+                "engine_down": True,
                 "body_revised": "", "raw": raw}
 
-    return _parse_review(raw)
+    out = _parse_review(raw)
+    out["reviewed_by"] = used_provider
+    return out
 
 
 def _parse_review(raw: str) -> dict[str, Any]:

@@ -532,7 +532,7 @@ def run_creators_pipeline(
 
     from ..ai.builder import build_ultimate_prompt
     from ..ai.library import load_packaged_library
-    from ..ai.providers import send_to_provider, ProviderError
+    from ..ai.providers import send_with_fallback, ProviderError
 
     library = load_packaged_library()
     selected_megas = [mp for mp in library if mp.get("id") in cfg.ai_mega_prompts]
@@ -623,7 +623,9 @@ def run_creators_pipeline(
         ctx = "\n".join(ctx_parts)
         full = build_ultimate_prompt(ctx, selected_megas)
         try:
-            response = send_to_provider(cfg.ai_provider, cfg.ai_model, full, api_keys)
+            # Bascule auto entre IA si l'IA préférée est en panne (plus de crédit…).
+            response, _cp_prov, _cp_model = send_with_fallback(
+                cfg.ai_provider, cfg.ai_model, full, api_keys)
         except (ProviderError, Exception) as e:
             stats["errors"].append(f"ai {p.get('name', '')[:20]}: {e}")
             continue

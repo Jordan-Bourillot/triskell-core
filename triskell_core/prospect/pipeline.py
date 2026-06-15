@@ -1342,7 +1342,9 @@ def _run_ai_outreach(
                         f"'{prospect.name[:30]}' -> redaction libre par l'IA")
                 user_prompt = _build_personalized_prompt(prospect, cfg)
                 full = build_ultimate_prompt(user_prompt, selected_megas)
-                response = ai_providers.send_to_provider(
+                # Bascule auto entre IA : si l'IA préférée est à sec (plus de
+                # crédit / coupure), on rédige avec une autre IA enregistrée.
+                response, _gen_prov, _gen_model = ai_providers.send_with_fallback(
                     cfg.ai_provider, cfg.ai_model, full, api_keys,
                 )
                 subject, body = _parse_ai_response(response, prospect, cfg)
@@ -1412,22 +1414,36 @@ def _run_ai_outreach(
                         api_keys=api_keys,
                         audience=prospect_audience,
                     )
-                    log(f"  [review] {prospect.name[:30]} : "
-                        f"score={review['score']}/10 verdict={review['verdict']} "
-                        f"-- {review['comment'][:80]}")
+                    _engine_down = bool(review.get("engine_down"))
                     review_for_draft = {
                         "score":   int(review.get("score") or 0),
                         "verdict": str(review.get("verdict") or ""),
                         "comment": str(review.get("comment") or "")[:300],
+                        "engine_down": _engine_down,
                     }
-                    n_reviewed += 1
-                    log({"type": "stage", "id": "review", "state": "running",
-                         "count": n_reviewed,
-                         "message": f"Dernier mail relu : {_prospect_label} (note {review['score']}/10)"})
+                    if _engine_down:
+                        # Panne du correcteur : aucune IA n'a pu noter. On NE
+                        # compte pas ça comme une relecture et on signale clair
+                        # (pas de faux « note X/10 »).
+                        log(f"  [review] {prospect.name[:30]} : ⚙️ correcteur en "
+                            f"panne -- {review['comment'][:80]}")
+                        log({"type": "stage", "id": "review", "state": "running",
+                             "count": n_reviewed,
+                             "message": "⚙️ 2è IA en panne (aucune IA disponible) — "
+                                        f"{_prospect_label} gardé en brouillon"})
+                    else:
+                        log(f"  [review] {prospect.name[:30]} : "
+                            f"score={review['score']}/10 verdict={review['verdict']} "
+                            f"-- {review['comment'][:80]}")
+                        n_reviewed += 1
+                        log({"type": "stage", "id": "review", "state": "running",
+                             "count": n_reviewed,
+                             "message": f"Dernier mail relu : {_prospect_label} (note {review['score']}/10)"})
                     if (review["verdict"] == "draft"
                         or review["score"] < cfg.autopilot_review_min_score):
                         effective_mode = MODE_VALIDATION
-                        log(f"    -> force en brouillon (score insuffisant)")
+                        if not _engine_down:
+                            log(f"    -> force en brouillon (score insuffisant)")
                     # === Micro-correction appliquee par la 2e IA ===
                     # REGLE STRICTE : si le mail vient d'un TEMPLATE deja
                     # ecrit a la main par Jordan, la 2e IA n'a PAS le droit
@@ -1472,6 +1488,7 @@ def _run_ai_outreach(
             # par fiche (tag), et tout échec retombe sur le brouillon normal.
             if (review_for_draft is not None
                     and review_for_draft.get("verdict") == "draft"
+                    and not review_for_draft.get("engine_down")
                     and "fiche_reparee" not in (prospect.tags or [])):
                 try:
                     from .record_repair import (
@@ -1733,9 +1750,18 @@ def _run_ai_outreach(
                 # manuelle (Jordan voit en un coup d'oeil les mails surs
                 # vs ceux qui meritent une relecture humaine attentive).
                 if review_for_draft:
-                    _draft_payload["review_score"]   = review_for_draft["score"]
-                    _draft_payload["review_verdict"] = review_for_draft["verdict"]
-                    _draft_payload["review_comment"] = review_for_draft["comment"]
+                    if review_for_draft.get("engine_down"):
+                        # Panne technique du correcteur : on garde le brouillon
+                        # (sécurité) mais on n'enregistre PAS un faux 0/10. Le
+                        # verdict spécial « engine_down » fait afficher « 2è IA
+                        # en panne » côté écran (note volontairement vide).
+                        _draft_payload["review_score"]   = None
+                        _draft_payload["review_verdict"] = "engine_down"
+                        _draft_payload["review_comment"] = review_for_draft["comment"]
+                    else:
+                        _draft_payload["review_score"]   = review_for_draft["score"]
+                        _draft_payload["review_verdict"] = review_for_draft["verdict"]
+                        _draft_payload["review_comment"] = review_for_draft["comment"]
                 # Base partagée d'abord : le brouillon part dans la table
                 # prospect_drafts → visible dans « Brouillons à valider »
                 # du site. Sinon (hors-ligne) : stockage local historique.
@@ -2055,8 +2081,16 @@ def _load_ai_keys() -> dict:
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            for k in ("anthropic", "openai", "google", "mistral", "xai"):
-                v = data.get(f"ai_api_key_{k}") or data.get(k) or ""
+            for k in ("anthropic", "openai", "google", "mistral", "xai", "deepseek"):
+                # Trois formats de nommage possibles dans config.json selon
+                # l'écriveur. Le format CANONIQUE est "{k}_api_key" (ex
+                # "google_api_key"), écrit par shared_secrets.sync_ai_keys_to_core
+                # ET lu par shared_secrets.get_ai_keys — c'est lui qui faisait
+                # défaut ici : l'auto-pilote ne voyait qu'une IA sur plusieurs
+                # enregistrées (toutes les clés de secours étaient invisibles).
+                v = (data.get(f"{k}_api_key")
+                     or data.get(f"ai_api_key_{k}")
+                     or data.get(k) or "")
                 if v:
                     keys[k] = v
         except Exception:

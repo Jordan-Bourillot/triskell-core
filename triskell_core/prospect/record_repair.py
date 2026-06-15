@@ -163,7 +163,11 @@ def propose_repair(
         city=(city or "(vide)").strip()[:80],
     )
     try:
-        raw = ai_providers.send_to_provider(provider, model, prompt, api_keys) or ""
+        # Bascule auto entre IA : si l'IA préférée est en panne, on tente les
+        # autres IA enregistrées avant d'abandonner la réparation.
+        raw, _used_prov, _used_model = ai_providers.send_with_fallback(
+            provider, model, prompt, api_keys)
+        raw = raw or ""
     except Exception as exc:
         logger.warning("record_repair: appel IA a échoué (%s)", exc)
         return None
