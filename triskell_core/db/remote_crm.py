@@ -69,8 +69,25 @@ class RemoteCRM:
         if not force and (now - self._cache_at) < self.CACHE_TTL_SEC and self._cache:
             return
         sb = self._client.raw
-        res = sb.table("prospects").select("*").execute()
-        rows = res.data or []
+        # ⚠️ Supabase/PostgREST plafonne un SELECT à 1000 lignes par défaut.
+        # Sans pagination, on ne chargeait que les 1000 premiers prospects —
+        # l'Auto-Pilote et les vues ignoraient le reste de la base (au 15/06
+        # /2026 : 1000 vus sur 2864). On pagine donc par lots de 1000.
+        rows = []
+        _PAGE = 1000
+        _page = 0
+        while True:
+            res = (sb.table("prospects").select("*")
+                   .order("id")
+                   .range(_page * _PAGE, _page * _PAGE + _PAGE - 1)
+                   .execute())
+            batch = res.data or []
+            rows.extend(batch)
+            if len(batch) < _PAGE:
+                break
+            _page += 1
+            if _page > 200:   # garde-fou dur (200k fiches max)
+                break
         self._cache = []
         self._id_by_match.clear()
         self._row_id_by_prospect.clear()
