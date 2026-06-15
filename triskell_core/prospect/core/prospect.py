@@ -62,6 +62,36 @@ def norm_website(url: str | None) -> str:
     return u
 
 
+# Adresse FR « 12 Rue X, 35000 Rennes[, France] » → (code_postal, ville).
+_FR_POSTAL_CITY_RE = re.compile(
+    r"\b(\d{5})\s+([^,]+?)(?:\s*,\s*France)?\s*$", re.IGNORECASE)
+
+
+def split_fr_address(address: str | None) -> tuple[str, str]:
+    """Déduit (code_postal, ville) d'une adresse à la française.
+
+    Ex : '65 Rue de Paris, 35000 Rennes' → ('35000', 'Rennes').
+    La ville Google Maps arrive collée au code postal en fin d'adresse ;
+    on la récupère pour ne plus laisser le champ ville vide (sinon les mails
+    de prospection sortent avec « … à , … » faute de ville). ('', '') si
+    rien d'exploitable.
+    """
+    if not address:
+        return "", ""
+    s = address.strip()
+    m = _FR_POSTAL_CITY_RE.search(s)
+    if not m:
+        # Ville pas en toute fin (suivie d'autre chose) : on prend ce qui suit
+        # le code postal jusqu'à la prochaine virgule.
+        m = re.search(r"\b(\d{5})\s+([^,]+)", s)
+    if not m:
+        return "", ""
+    cp = m.group(1)
+    city = re.sub(r"\s+CEDEX\b.*$", "", m.group(2).strip(),
+                  flags=re.IGNORECASE).strip()
+    return cp, city
+
+
 # ---------------------------------------------------------------------------
 # Source — métadonnée d'origine d'une donnée
 # ---------------------------------------------------------------------------
@@ -141,6 +171,18 @@ class Prospect:
     sources: list[Source] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
+
+    def __post_init__(self) -> None:
+        # Filet anti « ville manquante » : si on a une adresse à la française
+        # mais pas la ville (cas des fiches Google Maps, qui arrivent avec
+        # l'adresse complète mais sans ville isolée), on déduit ville + code
+        # postal depuis l'adresse. Évite qu'un mail parte avec « … à , … ».
+        if self.address and (not self.city or not self.postal_code):
+            cp, city = split_fr_address(self.address)
+            if city and not self.city:
+                self.city = city
+            if cp and not self.postal_code:
+                self.postal_code = cp
 
     # ---------- Identité pour dédoublonnage ----------
     @property
