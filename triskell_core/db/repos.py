@@ -62,6 +62,11 @@ def prospect_to_row(p: Prospect) -> dict[str, Any]:
         "tags": list(p.tags or []),
         "notes": p.notes or "",
         "last_contact_at": _to_iso(p.last_contact_at),
+        # Suivi prospection « créateurs » (migration SQL 51). Défensif :
+        # getattr avec défaut pour tolérer un objet Prospect plus ancien.
+        "contact_channel": getattr(p, "contact_channel", "") or "",
+        "next_follow_up_at": _to_iso(getattr(p, "next_follow_up_at", "")),
+        "demo_url": getattr(p, "demo_url", "") or "",
         "sources": [_source_to_dict(s) for s in (p.sources or [])],
         "match_keys": list(p.match_keys),
     }
@@ -101,6 +106,11 @@ def row_to_prospect(row: dict[str, Any]) -> Prospect:
     p.tags = list(row.get("tags") or [])
     p.notes = row.get("notes") or ""
     p.last_contact_at = _from_iso(row.get("last_contact_at"))
+    # Suivi prospection « créateurs » (migration SQL 51). .get tolère les
+    # colonnes absentes (DB pas encore migrée) → "" plutôt qu'une erreur.
+    p.contact_channel = row.get("contact_channel") or ""
+    p.next_follow_up_at = _from_iso(row.get("next_follow_up_at"))
+    p.demo_url = row.get("demo_url") or ""
     p.sources = [_dict_to_source(s) for s in (row.get("sources") or [])]
     p.created_at = _from_iso(row.get("created_at")) or p.created_at
     p.updated_at = _from_iso(row.get("updated_at")) or p.updated_at

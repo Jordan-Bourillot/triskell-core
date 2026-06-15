@@ -163,6 +163,12 @@ class Prospect:
     notes: str = ""
     history: list[dict[str, Any]] = field(default_factory=list)
     last_contact_at: str = ""
+    # Suivi prospection « créateurs » (démarchage par réseaux sociaux) —
+    # ajoutés en 2026-06 (migration SQL 51). Optionnels, défauts vides :
+    # les prospects existants restent intacts.
+    contact_channel: str = ""     # instagram / tiktok / youtube / facebook / email / autre
+    next_follow_up_at: str = ""   # date de prochaine relance réglée à la main (ISO), "" = aucune
+    demo_url: str = ""            # lien de la démo construite pour ce créateur
     # Drafts IA en attente de validation utilisateur (mode SAS)
     # Chaque draft : {ts, subject, body, template_key, provider, model, kind}
     pending_drafts: list[dict[str, Any]] = field(default_factory=list)
