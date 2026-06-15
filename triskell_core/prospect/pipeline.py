@@ -1184,7 +1184,13 @@ def _run_ai_outreach(
 
     # Délivrabilité : adresses CONFIRMÉES d'abord (tri stable), les
     # devinées (contact@/info@…) en queue + quota d'envoi direct dédié.
-    eligible.sort(key=_email_is_guessed)
+    # ET, à qualité de mail égale, on contacte EN PRIORITÉ les « sites à
+    # refaire » (tag site_a_refaire) : ce sont les prospects qui convertissent
+    # le mieux — on a un vrai service à leur vendre (demande Jordan 15/06/2026).
+    def _send_priority(p):
+        is_redo = "site_a_refaire" in (getattr(p, "tags", None) or [])
+        return (_email_is_guessed(p), 0 if is_redo else 1)
+    eligible.sort(key=_send_priority)
     _guessed_quota = max(0, int(getattr(cfg, "guessed_daily_cap", 8) or 0))
     _guessed_sent = 0
     _n_guessed_selected = sum(1 for p in eligible[:cap] if _email_is_guessed(p))
