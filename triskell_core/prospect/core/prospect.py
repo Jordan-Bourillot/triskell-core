@@ -89,6 +89,15 @@ def split_fr_address(address: str | None) -> tuple[str, str]:
     cp = m.group(1)
     city = re.sub(r"\s+CEDEX\b.*$", "", m.group(2).strip(),
                   flags=re.IGNORECASE).strip()
+    # Communes listées avec l'article inversé : « Chapelle des Fougeretz (La) »
+    # (Google tronque parfois en « (La ») ou « Mans (Le) » → on remet l'article
+    # devant : « La Chapelle des Fougeretz », « Le Mans », « L'Île-Rousse ».
+    ma = re.match(r"^(.+?)\s*\(\s*(le|la|les|l['’])\s*\)?\s*$", city,
+                  flags=re.IGNORECASE)
+    if ma:
+        nom = ma.group(1).strip()
+        art = ma.group(2).strip().capitalize()
+        city = (art + nom) if art.endswith(("'", "’")) else (art + " " + nom)
     return cp, city
 
 
