@@ -1884,6 +1884,22 @@ def _pro_category(secteur: str) -> str:
     import unicodedata
     s = "".join(c for c in unicodedata.normalize("NFD", (secteur or "").lower())
                 if unicodedata.category(c) != "Mn")
+    # Métiers à démo Pixel Pros dédiée (16/06/2026) : on les route en amont
+    # vers le parcours « visuel » (commerce/artisan) pour que l'aperçu de leur
+    # démo apparaisse bien dans le mail — même quand le mot-clé ressemblerait
+    # à un cabinet (« ostéo », « architecte ») ou n'est dans aucune liste.
+    if any(k in s for k in ("osteo", "kinesi", "kine", "reeduc")):
+        return "commerce"   # ostéo & kiné (paramédical, mais a une démo)
+    if any(k in s for k in ("architecte d'interieur", "architecte interieur",
+                            "decorateur", "decoratrice", "home staging")):
+        return "commerce"   # architecte / décorateur d'intérieur
+    if "piscin" in s:
+        return "artisan"    # pisciniste
+    if any(k in s for k in ("chambre", "gite", "maison d'hote", "hotes")):
+        return "commerce"   # chambres d'hôtes / gîtes
+    if any(k in s for k in ("auto-ecole", "auto ecole", "ecole de conduite",
+                            "permis")):
+        return "commerce"   # auto-école
     artisan = ("plomb", "chauffag", "electric", "peintr", "carrel", "faienc",
                "macon", "menuis", "ebenist", "charpent", "plaquist", "placo",
                "platr", "paysag", "jardin", "elagag", "espaces vert", "couvr",
