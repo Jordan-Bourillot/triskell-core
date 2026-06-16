@@ -1883,7 +1883,8 @@ def _pro_category(secteur: str) -> str:
     """
     import re
     import unicodedata
-    s = "".join(c for c in unicodedata.normalize("NFD", (secteur or "").lower())
+    base = (secteur or "").lower().replace("œ", "oe").replace("æ", "ae")
+    s = "".join(c for c in unicodedata.normalize("NFD", base)
                 if unicodedata.category(c) != "Mn")
     s = s.replace("’", "'")   # apostrophe typographique → droite (d'intérieur…)
     # Métiers à démo Pixel Pros dédiée (16/06/2026) : on les route en amont
@@ -1938,6 +1939,28 @@ def _pro_category(secteur: str) -> str:
             "disc jockey", "disc-jockey", "deejay", "sonorisation",
             "animation de soiree", "animation musicale")):
         return "commerce"   # DJ / animation de soirées
+    # — 8 métiers de plus (16/06/2026) —
+    if any(k in s for k in ("demenag", "garde-meuble")):
+        return "artisan"    # déménageur
+    if any(k in s for k in ("domoti", "alarme", "videosurveillance",
+                            "video surveillance", "videoprotection",
+                            "maison connectee")):
+        return "artisan"    # domoticien / sécurité
+    if any(k in s for k in ("diagnostiqueur", "diagnostic immobilier",
+                            "diagnostics immobiliers", "diagnostic immo", "dpe")):
+        return "commerce"   # diagnostiqueur immobilier
+    if "veterin" in s:
+        return "commerce"   # vétérinaire (était « cabinet » : a une démo)
+    if any(k in s for k in ("constructeur de maison", "constructeur maison",
+                            "maitre d'oeuvre", "maitre d oeuvre",
+                            "maison individuelle", "constructeur")):
+        return "artisan"    # constructeur de maisons
+    if any(k in s for k in ("boucher", "boucherie", "charcuti")):
+        return "commerce"   # boucher-charcutier
+    if any(k in s for k in ("bijou", "joaill", "orfevr", "horloger")):
+        return "commerce"   # bijoutier-horloger
+    if any(k in s for k in ("opticien", "optique", "lunetier", "lunetterie")):
+        return "commerce"   # opticien
     artisan = ("plomb", "chauffag", "electric", "peintr", "carrel", "faienc",
                "macon", "menuis", "ebenist", "charpent", "plaquist", "placo",
                "platr", "paysag", "jardin", "elagag", "espaces vert", "couvr",
