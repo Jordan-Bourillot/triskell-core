@@ -1893,6 +1893,8 @@ def _pro_category(secteur: str) -> str:
     # à un cabinet (« ostéo », « architecte ») ou n'est dans aucune liste.
     if any(k in s for k in ("osteo", "kinesi", "kine", "reeduc")):
         return "commerce"   # ostéo & kiné (paramédical, mais a une démo)
+    if "tapiss" in s:
+        return "artisan"    # tapissier-décorateur (AVANT « decorateur »)
     if any(k in s for k in ("architecte d'interieur", "architecte interieur",
                             "architecte d interieur", "decorateur", "decoratrice",
                             "decoration d'interieur", "home staging")):
@@ -1961,6 +1963,19 @@ def _pro_category(secteur: str) -> str:
         return "commerce"   # bijoutier-horloger
     if any(k in s for k in ("opticien", "optique", "lunetier", "lunetterie")):
         return "commerce"   # opticien
+    # — 6 métiers de plus (16/06/2026) —
+    if any(k in s for k in ("fromag", "cremerie", "cremier")):
+        return "commerce"   # fromager-affineur
+    if any(k in s for k in ("poissonn", "maree", "fruits de mer", "ecailler")):
+        return "commerce"   # poissonnier
+    if any(k in s for k in ("torref", "brulerie", "cafe de specialite", "barista")):
+        return "commerce"   # torréfacteur
+    if any(k in s for k in ("microbrasserie", "micro-brasserie", "brasseur",
+                            "biere artisanale")):
+        return "commerce"   # microbrasserie
+    if any(k in s for k in ("homme toutes mains", "toutes mains", "multiservice",
+                            "petits travaux", "petit travaux", "factotum", "bricol")):
+        return "artisan"    # homme toutes mains / petits travaux
     artisan = ("plomb", "chauffag", "electric", "peintr", "carrel", "faienc",
                "macon", "menuis", "ebenist", "charpent", "plaquist", "placo",
                "platr", "paysag", "jardin", "elagag", "espaces vert", "couvr",
