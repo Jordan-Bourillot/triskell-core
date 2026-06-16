@@ -1881,9 +1881,11 @@ def _pro_category(secteur: str) -> str:
     Renvoie "" si le métier n'est pas reconnu → l'appelant garde alors TOUS les
     modèles 'pro' (jamais de trou, comportement historique).
     """
+    import re
     import unicodedata
     s = "".join(c for c in unicodedata.normalize("NFD", (secteur or "").lower())
                 if unicodedata.category(c) != "Mn")
+    s = s.replace("’", "'")   # apostrophe typographique → droite (d'intérieur…)
     # Métiers à démo Pixel Pros dédiée (16/06/2026) : on les route en amont
     # vers le parcours « visuel » (commerce/artisan) pour que l'aperçu de leur
     # démo apparaisse bien dans le mail — même quand le mot-clé ressemblerait
@@ -1891,7 +1893,8 @@ def _pro_category(secteur: str) -> str:
     if any(k in s for k in ("osteo", "kinesi", "kine", "reeduc")):
         return "commerce"   # ostéo & kiné (paramédical, mais a une démo)
     if any(k in s for k in ("architecte d'interieur", "architecte interieur",
-                            "decorateur", "decoratrice", "home staging")):
+                            "architecte d interieur", "decorateur", "decoratrice",
+                            "decoration d'interieur", "home staging")):
         return "commerce"   # architecte / décorateur d'intérieur
     if "piscin" in s:
         return "artisan"    # pisciniste
@@ -1900,6 +1903,41 @@ def _pro_category(secteur: str) -> str:
     if any(k in s for k in ("auto-ecole", "auto ecole", "ecole de conduite",
                             "permis")):
         return "commerce"   # auto-école
+    # — 15 nouveaux métiers à démo (16/06/2026) : on force commerce/artisan
+    #   pour qu'ils reçoivent bien l'aperçu (jamais « cabinet », jamais vide). —
+    if any(k in s for k in ("lavage auto", "lavage automobile", "detailing",
+                            "car wash", "nettoyage auto", "lustrage")):
+        return "artisan"    # lavage auto & detailing
+    if any(k in s for k in ("food truck", "food-truck", "foodtruck", "food trailer",
+                            "camion pizza", "camion a pizza", "camion restaurant",
+                            "camion a burger", "street food")):
+        return "commerce"   # food truck
+    if any(k in s for k in ("dieteti", "nutrition")):
+        return "commerce"   # diététicien / nutritionniste (paramédical, a une démo)
+    if any(k in s for k in ("salle de sport", "salle de fitness", "fitness",
+                            "crossfit", "cross-fit", "musculation", "club de sport")):
+        return "commerce"   # salle de sport
+    if any(k in s for k in ("salle de reception", "salle des fetes", "salle de fete",
+                            "domaine de mariage", "domaine de reception",
+                            "lieu de reception", "location de salle")):
+        return "commerce"   # salle de réception
+    if any(k in s for k in ("wedding", "organisateur de mariage",
+                            "organisation de mariage", "organisateur d'evenement",
+                            "organisation d'evenement", "organisateur d evenement",
+                            "organisation d evenement")):
+        return "commerce"   # wedding planner / organisateur d'événements
+    if any(k in s for k in ("agent immobilier", "agence immobiliere",
+                            "mandataire immo", "negociateur immo", "immobilier",
+                            "immobiliere")):
+        return "commerce"   # agent immobilier
+    if any(k in s for k in ("poele", "granul", "pellet", "pompe a chaleur",
+                            "aerotherm", "geotherm", "climatis", "photovolta",
+                            "panneau solaire", "energies renouvelab")):
+        return "artisan"    # chauffage nouvelle génération (poêle granulés, PAC)
+    if re.search(r"\bdj\b", s) or any(k in s for k in (
+            "disc jockey", "disc-jockey", "deejay", "sonorisation",
+            "animation de soiree", "animation musicale")):
+        return "commerce"   # DJ / animation de soirées
     artisan = ("plomb", "chauffag", "electric", "peintr", "carrel", "faienc",
                "macon", "menuis", "ebenist", "charpent", "plaquist", "placo",
                "platr", "paysag", "jardin", "elagag", "espaces vert", "couvr",
