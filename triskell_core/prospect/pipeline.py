@@ -285,12 +285,23 @@ def _store_validation_draft(crm, prospect, payload: dict) -> bool:
         # exigée voyage avec le brouillon jusqu'à la validation.
         if payload.get("sender_address"):
             extended["sender_address"] = payload["sender_address"]
+        # Retouche unique de la 2e IA (migration 53) : avant/après note + type.
+        extended_full = dict(extended)
+        for k in ("review_score_before", "review_score_after",
+                  "review_modif_type", "review_modif_applied"):
+            if k in payload:
+                extended_full[k] = payload[k]
         sb = client.raw
         try:
-            sb.table("prospect_drafts").insert(extended).execute()
+            sb.table("prospect_drafts").insert(extended_full).execute()
         except Exception:
-            # Colonnes bonus absentes (migration 45 pas encore appliquée)
-            sb.table("prospect_drafts").insert(row).execute()
+            try:
+                # Migration 53 pas encore appliquée : on insère sans les
+                # champs de retouche (avant/après note + type).
+                sb.table("prospect_drafts").insert(extended).execute()
+            except Exception:
+                # Colonnes bonus absentes (migration 45 pas encore appliquée).
+                sb.table("prospect_drafts").insert(row).execute()
         return True
     except Exception as exc:
         logger.warning("brouillon -> base partagée KO (%s), fallback local", exc)
@@ -425,6 +436,16 @@ def _is_within_send_window(cfg: "PipelineConfig") -> bool:
     if start < end:
         return start <= h < end
     return h >= start or h < end
+
+
+def _retouche_keeps(score_before: int, score_after) -> bool:
+    """La micro-retouche de la 2e IA n'est GARDEE que si elle ameliore (ou
+    egale) la note ; sinon on revient au mail d'origine. (Jordan, 17/06/2026.)
+    """
+    try:
+        return score_after is not None and int(score_after) >= int(score_before)
+    except Exception:
+        return False
 
 
 def _resolve_review_min_score(raw) -> int:
@@ -1439,28 +1460,69 @@ def _run_ai_outreach(
                         log({"type": "stage", "id": "review", "state": "running",
                              "count": n_reviewed,
                              "message": f"Dernier mail relu : {_prospect_label} (note {review['score']}/10)"})
-                    if (review["verdict"] == "draft"
-                        or review["score"] < cfg.autopilot_review_min_score):
+
+                    # === Micro-retouche par la 2e IA (autorisee UNE seule fois) ===
+                    # Demande de Jordan (17/06/2026) : la 2e IA a le droit de
+                    # proposer UNE petite retouche (1-2 phrases), on l'applique,
+                    # puis on RELIT et on RENOTE -- une seule fois (pas de boucle).
+                    # On ne garde la retouche que si elle AMELIORE (ou egale) la
+                    # note ; sinon on revient au mail d'origine. Vaut AUSSI pour
+                    # les mails issus d'un template (l'ancienne regle « ne touche
+                    # pas aux modeles » est levee pour cette retouche unique).
+                    _score_before = int(review.get("score") or 0)
+                    _score_after = None
+                    _modif_type = str(review.get("modif_type") or "").strip()[:80]
+                    _applied = False
+                    _revised = (review.get("body_revised") or "").strip()
+                    if _revised and not _engine_down and _revised != (body or "").strip():
+                        _original_body = body
+                        log("    -> 2e IA propose une retouche, relecture de la "
+                            "version retouchee...")
+                        try:
+                            review2 = review_email(
+                                subject=subject, body=_revised,
+                                prospect_context=ctx,
+                                provider=cfg.ai_provider, model=cfg.ai_model,
+                                api_keys=api_keys, audience=prospect_audience,
+                            )
+                        except Exception as _exc2:
+                            review2 = {"engine_down": True}
+                        if not review2.get("engine_down"):
+                            _score_after = int(review2.get("score") or 0)
+                            if _retouche_keeps(_score_before, _score_after):
+                                # La retouche aide (ou neutre) -> on la garde et
+                                # la 2e note pilote la decision + l'affichage.
+                                body = _revised
+                                _applied = True
+                                review_for_draft["score"]   = _score_after
+                                review_for_draft["verdict"] = str(
+                                    review2.get("verdict") or review_for_draft["verdict"])
+                                review_for_draft["comment"] = str(
+                                    review2.get("comment") or review_for_draft["comment"])[:300]
+                                log(f"    -> retouche GARDEE ({_modif_type or 'retouche'}) "
+                                    f": note {_score_before} -> {_score_after}")
+                            else:
+                                # La retouche n'ameliore pas -> mail d'origine.
+                                body = _original_body
+                                log(f"    -> retouche ANNULEE (note {_score_before} -> "
+                                    f"{_score_after}, n'ameliore pas), origine gardee")
+                        else:
+                            log("    -> version retouchee impossible a relire (IA "
+                                "indispo), mail d'origine garde")
+                    # Avant/apres + type de retouche, pour l'afficher sur le brouillon.
+                    review_for_draft["score_before"]  = _score_before
+                    review_for_draft["score_after"]   = _score_after
+                    review_for_draft["modif_type"]    = _modif_type
+                    review_for_draft["modif_applied"] = _applied
+
+                    # === Decision envoi vs brouillon (sur la note FINALE) ===
+                    if (review_for_draft["verdict"] == "draft"
+                            or int(review_for_draft["score"] or 0)
+                               < cfg.autopilot_review_min_score):
                         effective_mode = MODE_VALIDATION
                         if not _engine_down:
-                            log(f"    -> force en brouillon (score insuffisant)")
-                    # === Micro-correction appliquee par la 2e IA ===
-                    # REGLE STRICTE : si le mail vient d'un TEMPLATE deja
-                    # ecrit a la main par Jordan, la 2e IA n'a PAS le droit
-                    # de modifier le corps -- juste de noter. Jordan a dit
-                    # explicitement "n'a pas besoin de reecrire quoi que ce
-                    # soit". Donc body_revised n'est applique que pour les
-                    # mails en generation libre (pas de template).
-                    _revised = (review.get("body_revised") or "").strip()
-                    _was_template = bool(use_templates)
-                    _applied = False
-                    if _revised and not _was_template and _revised != body.strip():
-                        log(f"    -> 2e IA a propose une micro-modification, appliquee.")
-                        body = _revised
-                        _applied = True
-                    elif _revised and _was_template:
-                        log(f"    -> 2e IA a propose une modif mais on est en mode "
-                            f"TEMPLATE, on n'y touche pas (regle de Jordan).")
+                            log("    -> force en brouillon (score insuffisant)")
+
                     # Trace la review dans l'historique du prospect. Via le
                     # CRM partagé, elle part dans email_history → le
                     # compteur "Relit" du tableau de commande remonte ENFIN
@@ -1468,9 +1530,9 @@ def _run_ai_outreach(
                     _record_event(crm, prospect, {
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "kind": "email_reviewed",
-                        "score": review["score"],
-                        "verdict": review["verdict"],
-                        "comment": review["comment"],
+                        "score": review_for_draft["score"],
+                        "verdict": review_for_draft["verdict"],
+                        "comment": review_for_draft["comment"],
                         "edited": _applied,
                     })
                 except Exception as exc:
@@ -1762,6 +1824,12 @@ def _run_ai_outreach(
                         _draft_payload["review_score"]   = review_for_draft["score"]
                         _draft_payload["review_verdict"] = review_for_draft["verdict"]
                         _draft_payload["review_comment"] = review_for_draft["comment"]
+                        # Retouche unique de la 2e IA (avant/apres + type) pour
+                        # l'afficher dans « Brouillons a valider ».
+                        _draft_payload["review_score_before"]  = review_for_draft.get("score_before")
+                        _draft_payload["review_score_after"]   = review_for_draft.get("score_after")
+                        _draft_payload["review_modif_type"]    = review_for_draft.get("modif_type") or ""
+                        _draft_payload["review_modif_applied"] = bool(review_for_draft.get("modif_applied"))
                 # Base partagée d'abord : le brouillon part dans la table
                 # prospect_drafts → visible dans « Brouillons à valider »
                 # du site. Sinon (hors-ligne) : stockage local historique.

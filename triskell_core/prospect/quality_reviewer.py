@@ -47,6 +47,9 @@ REGLES :
 - Si tu ne proposes aucune amelioration -> body_revised = "" (chaine vide).
 - Si tu en proposes une, body_revised = le corps complet du mail avec ta \
 modif integree (et SEULEMENT ta modif). Le reste du mail reste intact.
+- Si tu proposes une retouche, modif_type = 2 a 4 mots qui disent le TYPE de \
+retouche (ex: "phrase reformulee", "repetition enlevee", "tournure corrigee", \
+"personnalisation renforcee"). Sinon modif_type = "".
 - Ne touche pas a la signature, ni aux URLs, ni au sujet.
 {tone_rule}
 
@@ -55,7 +58,8 @@ Reponds UNIQUEMENT en JSON, sans markdown, sans commentaire avant ou apres :
   "score": <int 1-10>,
   "verdict": "ok" ou "draft",
   "comment": "<une phrase qui explique la note et eventuellement ce que tu as ajuste>",
-  "body_revised": "<corps modifie OU chaine vide si rien a ajuster>"
+  "body_revised": "<corps modifie OU chaine vide si rien a ajuster>",
+  "modif_type": "<2 a 4 mots: type de retouche, OU chaine vide>"
 }}
 
 CONTEXTE DU PROSPECT :
@@ -180,5 +184,6 @@ def _parse_review(raw: str) -> dict[str, Any]:
         verdict = "ok" if score >= 7 else "draft"
     comment = str(data.get("comment") or "").strip()[:300]
     body_revised = str(data.get("body_revised") or "").strip()
+    modif_type = str(data.get("modif_type") or "").strip()[:80]
     return {"score": score, "verdict": verdict, "comment": comment,
-            "body_revised": body_revised, "raw": raw}
+            "body_revised": body_revised, "modif_type": modif_type, "raw": raw}
