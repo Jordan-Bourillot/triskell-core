@@ -1406,6 +1406,8 @@ def _run_ai_outreach(
             # pour trier vite (les douteux passent en revue, les bons sont
             # valides sans relire).
             review_for_draft: dict | None = None
+            _applied = False            # une retouche de la 2e IA a-t-elle ete appliquee ?
+            _orig_body_for_html = None  # texte AVANT retouche (pour la reporter dans le HTML)
             if review_enabled:
                 log({"type": "activity",
                      "message": f"La 2è IA relit le mail pour {_prospect_label}..."})
@@ -1472,6 +1474,7 @@ def _run_ai_outreach(
                         # pour afficher la nouvelle note (avant -> apres), en toute
                         # transparence : si elle baisse, Jordan le voit et tranche
                         # a la validation manuelle.
+                        _orig_body_for_html = body
                         body = _revised
                         _applied = True
                         log(f"    -> retouche appliquee ({_modif_type or 'retouche'}), "
@@ -1710,6 +1713,18 @@ def _run_ai_outreach(
                 except Exception as _exc:
                     logger.debug("text_to_email_html indispo: %s", _exc)
                     body_html = ""
+
+            # Retouche dans un HTML de MODELE (avec apercu du site) : on ne
+            # REGENERE PAS le HTML (ca ferait sauter l'apercu) -> on remplace
+            # juste la phrase retouchee SUR PLACE. Introuvable -> on ne touche
+            # a rien (l'apercu reste). (Jordan, 17/06/2026.)
+            if _applied and _html_is_custom and body_html and _orig_body_for_html:
+                try:
+                    from .quality_reviewer import apply_retouche_to_html
+                    body_html, _ = apply_retouche_to_html(
+                        _orig_body_for_html, body, body_html)
+                except Exception as _exc:
+                    logger.debug("retouche-in-place HTML KO: %s", _exc)
 
             if effective_mode == MODE_AUTO:
                 log({"type": "activity",

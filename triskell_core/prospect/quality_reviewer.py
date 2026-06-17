@@ -18,6 +18,7 @@ triskell_core (ai/providers.py).
 """
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -187,6 +188,49 @@ def normalize_modif_type(raw: str) -> str:
         if any(k in s for k in kws):
             return cat
     return "autre"
+
+
+def apply_retouche_to_html(old_body: str, new_body: str, body_html: str):
+    """Applique la retouche (old_body -> new_body) DANS le HTML existant en ne
+    remplacant QUE le morceau change, SANS regenerer le HTML -> l'apercu du site
+    et la mise en page restent intacts. Si le morceau est introuvable dans le
+    HTML (encodage different : apostrophes &rsquo;, espaces &nbsp;...), on NE
+    TOUCHE A RIEN et on renvoie (body_html, False) : mieux vaut une retouche qui
+    ne passe pas qu'un apercu detruit. (Jordan, 17/06/2026.)
+
+    Renvoie (nouveau_html, applique: bool).
+    """
+    old_body = old_body or ""
+    new_body = new_body or ""
+    html_in = body_html or ""
+    if not html_in or not new_body.strip() or old_body.strip() == new_body.strip():
+        return html_in, False
+    # Un seul morceau change (du 1er au dernier ecart) = plus robuste a trouver
+    # qu'une foule de petits remplacements.
+    ops = [o for o in difflib.SequenceMatcher(None, old_body, new_body,
+                                              autojunk=False).get_opcodes()
+           if o[0] != "equal"]
+    if not ops:
+        return html_in, False
+    i1, i2 = ops[0][1], ops[-1][2]
+    j1, j2 = ops[0][3], ops[-1][4]
+    old_chunk = old_body[i1:i2]
+    new_chunk = new_body[j1:j2]
+    if not old_chunk.strip():
+        return html_in, False  # pur ajout : on ne sait pas ou inserer -> abstention
+    # Essaie quelques encodages HTML possibles (typographie FR). On applique le
+    # MEME encodage au morceau de remplacement.
+    apos = (lambda t: t,
+            lambda t: t.replace("'", "&rsquo;").replace("’", "&rsquo;"),
+            lambda t: t.replace("'", "&#39;").replace("’", "&#39;"))
+    nbsp = (lambda t: t,
+            lambda t: re.sub(r" ([:;!?»])", r"&nbsp;\1", t))
+    for fa in apos:
+        for fn in nbsp:
+            enc_old = fn(fa(old_chunk))
+            if enc_old and enc_old in html_in:
+                return html_in.replace(enc_old, fn(fa(new_chunk)), 1), True
+    return html_in, False
 
 
 def _parse_review(raw: str) -> dict[str, Any]:
