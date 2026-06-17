@@ -438,16 +438,6 @@ def _is_within_send_window(cfg: "PipelineConfig") -> bool:
     return h >= start or h < end
 
 
-def _retouche_keeps(score_before: int, score_after) -> bool:
-    """La micro-retouche de la 2e IA n'est GARDEE que si elle ameliore (ou
-    egale) la note ; sinon on revient au mail d'origine. (Jordan, 17/06/2026.)
-    """
-    try:
-        return score_after is not None and int(score_after) >= int(score_before)
-    except Exception:
-        return False
-
-
 def _resolve_review_min_score(raw) -> int:
     """Seuil effectif de la 2e IA de relecture.
 
@@ -1475,9 +1465,17 @@ def _run_ai_outreach(
                     _applied = False
                     _revised = (review.get("body_revised") or "").strip()
                     if _revised and not _engine_down and _revised != (body or "").strip():
-                        _original_body = body
-                        log("    -> 2e IA propose une retouche, relecture de la "
-                            "version retouchee...")
+                        # Decision de Jordan (17/06/2026) : si la 2e IA repere une
+                        # retouche, on l'APPLIQUE -- meme si la note ne monte pas
+                        # (une amelioration de style ne se voit pas toujours dans
+                        # la note sur 10). On relit quand meme la version retouchee
+                        # pour afficher la nouvelle note (avant -> apres), en toute
+                        # transparence : si elle baisse, Jordan le voit et tranche
+                        # a la validation manuelle.
+                        body = _revised
+                        _applied = True
+                        log(f"    -> retouche appliquee ({_modif_type or 'retouche'}), "
+                            "relecture pour la nouvelle note...")
                         try:
                             review2 = review_email(
                                 subject=subject, body=_revised,
@@ -1485,30 +1483,19 @@ def _run_ai_outreach(
                                 provider=cfg.ai_provider, model=cfg.ai_model,
                                 api_keys=api_keys, audience=prospect_audience,
                             )
-                        except Exception as _exc2:
+                        except Exception:
                             review2 = {"engine_down": True}
                         if not review2.get("engine_down"):
                             _score_after = int(review2.get("score") or 0)
-                            if _retouche_keeps(_score_before, _score_after):
-                                # La retouche aide (ou neutre) -> on la garde et
-                                # la 2e note pilote la decision + l'affichage.
-                                body = _revised
-                                _applied = True
-                                review_for_draft["score"]   = _score_after
-                                review_for_draft["verdict"] = str(
-                                    review2.get("verdict") or review_for_draft["verdict"])
-                                review_for_draft["comment"] = str(
-                                    review2.get("comment") or review_for_draft["comment"])[:300]
-                                log(f"    -> retouche GARDEE ({_modif_type or 'retouche'}) "
-                                    f": note {_score_before} -> {_score_after}")
-                            else:
-                                # La retouche n'ameliore pas -> mail d'origine.
-                                body = _original_body
-                                log(f"    -> retouche ANNULEE (note {_score_before} -> "
-                                    f"{_score_after}, n'ameliore pas), origine gardee")
+                            review_for_draft["score"]   = _score_after
+                            review_for_draft["verdict"] = str(
+                                review2.get("verdict") or review_for_draft["verdict"])
+                            review_for_draft["comment"] = str(
+                                review2.get("comment") or review_for_draft["comment"])[:300]
+                            log(f"    -> note {_score_before} -> {_score_after}")
                         else:
-                            log("    -> version retouchee impossible a relire (IA "
-                                "indispo), mail d'origine garde")
+                            log("    -> nouvelle note indisponible (IA indispo), "
+                                "retouche gardee, ancienne note conservee")
                     # Avant/apres + type de retouche, pour l'afficher sur le brouillon.
                     review_for_draft["score_before"]  = _score_before
                     review_for_draft["score_after"]   = _score_after
