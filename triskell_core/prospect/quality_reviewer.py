@@ -47,9 +47,9 @@ REGLES :
 - Si tu ne proposes aucune amelioration -> body_revised = "" (chaine vide).
 - Si tu en proposes une, body_revised = le corps complet du mail avec ta \
 modif integree (et SEULEMENT ta modif). Le reste du mail reste intact.
-- Si tu proposes une retouche, modif_type = 2 a 4 mots qui disent le TYPE de \
-retouche (ex: "phrase reformulee", "repetition enlevee", "tournure corrigee", \
-"personnalisation renforcee"). Sinon modif_type = "".
+- Si tu proposes une retouche, modif_type DOIT etre EXACTEMENT l'une de ces \
+categories (choisis la plus proche) : "fluidite", "repetition", \
+"personnalisation", "clarte", "ton", "concision", "accroche". Sinon modif_type = "".
 - Ne touche pas a la signature, ni aux URLs, ni au sujet.
 {tone_rule}
 
@@ -59,7 +59,7 @@ Reponds UNIQUEMENT en JSON, sans markdown, sans commentaire avant ou apres :
   "verdict": "ok" ou "draft",
   "comment": "<une phrase qui explique la note et eventuellement ce que tu as ajuste>",
   "body_revised": "<corps modifie OU chaine vide si rien a ajuster>",
-  "modif_type": "<2 a 4 mots: type de retouche, OU chaine vide>"
+  "modif_type": "<une categorie: fluidite|repetition|personnalisation|clarte|ton|concision|accroche, OU chaine vide>"
 }}
 
 CONTEXTE DU PROSPECT :
@@ -151,6 +151,44 @@ def review_email(
     return out
 
 
+# Categories FIXES de retouche (Jordan 17/06/2026). La 2e IA decrivait chaque
+# retouche avec des mots differents ("transition allegee", "fluidite amelioree",
+# "transition superflue retiree"...) -> impossible de detecter un pattern. On
+# range chaque retouche dans une categorie fixe : a l'echelle, "fluidite : 12x
+# sur le modele X" ressort clairement -> signal "revois ce modele".
+MODIF_CATEGORIES = (
+    "fluidité", "répétition", "personnalisation",
+    "clarté", "ton", "concision", "accroche",
+)
+_MODIF_KEYWORDS = {
+    "fluidité": ("fluid", "transition", "enchain", "tournure"),
+    "répétition": ("repet", "répét", "redond"),
+    "personnalisation": ("personnalis", "prospect", "métier", "metier", "ville"),
+    "clarté": ("clart", "clair", "offre", "formul", "précis", "precis",
+               "compréhen", "comprehen"),
+    "ton": ("ton", "chaleur", "insist", "impérat", "imperat", "pousse", "douceur"),
+    "concision": ("concis", "court", "raccourc", "superflu", "longueur",
+                  "allég", "alleg", "retir", "supprim"),
+    "accroche": ("accroch", "objet", "ouvertur", "début", "debut"),
+}
+
+
+def normalize_modif_type(raw: str) -> str:
+    """Range un type de retouche (texte libre de l'IA) dans une CATEGORIE FIXE,
+    pour que la detection de pattern fonctionne. Vide -> vide ; inconnu -> autre.
+    """
+    s = (raw or "").strip().lower()
+    if not s:
+        return ""
+    for cat in MODIF_CATEGORIES:
+        if cat in s:
+            return cat
+    for cat, kws in _MODIF_KEYWORDS.items():
+        if any(k in s for k in kws):
+            return cat
+    return "autre"
+
+
 def _parse_review(raw: str) -> dict[str, Any]:
     """Extrait {score, verdict, comment} d'une reponse IA tolerante."""
     raw = (raw or "").strip()
@@ -184,6 +222,6 @@ def _parse_review(raw: str) -> dict[str, Any]:
         verdict = "ok" if score >= 7 else "draft"
     comment = str(data.get("comment") or "").strip()[:300]
     body_revised = str(data.get("body_revised") or "").strip()
-    modif_type = str(data.get("modif_type") or "").strip()[:80]
+    modif_type = normalize_modif_type(str(data.get("modif_type") or ""))
     return {"score": score, "verdict": verdict, "comment": comment,
             "body_revised": body_revised, "modif_type": modif_type, "raw": raw}
