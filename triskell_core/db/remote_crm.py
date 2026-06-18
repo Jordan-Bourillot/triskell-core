@@ -11,8 +11,9 @@ Stratégie d'écriture :
   champ `id` interne.
 - `save()` : no-op (Supabase écrit en direct, pas de buffering local).
   Le flag `_dirty` est gardé pour compat avec le code qui le toggle.
-- `all()` : SELECT *, transforme en list[Prospect]. Cache 5 secondes
-  pour éviter de spammer l'API si plusieurs vues lisent à la suite.
+- `all()` : SELECT *, transforme en list[Prospect]. Cache mémoire
+  (CACHE_TTL_SEC), tenu à jour en mémoire à chaque upsert, pour éviter
+  de relire toute la base à chaque opération (versement, envoi…).
 
 History et pending_drafts ne sont PAS dans la table prospects ; ils ont
 leurs tables propres (email_history, prospect_drafts) qu'on hydrate en
@@ -42,7 +43,12 @@ logger = logging.getLogger(__name__)
 class RemoteCRM:
     """CRM dont la persistance est Supabase. API compatible CRM local."""
 
-    CACHE_TTL_SEC = 5
+    # Relevé de 5 s à 600 s : un même CRM (passe d'envoi, versement de
+    # prospects) charge la base UNE fois puis réutilise le cache — tenu à jour
+    # en mémoire à chaque upsert — au lieu de tout relire à chaque fiche.
+    # get_crm() rend une instance NEUVE par appel → la fraîcheur côté web reste
+    # intacte (chaque requête recharge l'état réel).
+    CACHE_TTL_SEC = 600
 
     def __init__(self, client: SupabaseClient | None = None,
                  path: Path | None = None):
@@ -201,7 +207,11 @@ class RemoteCRM:
                         for k in existing.match_keys:
                             self._id_by_match.setdefault(k, new_id)
             self._dirty = True
-            self._cache_at = 0.0
+            # On NE remet PAS le cache à 0 : il est déjà tenu à jour en mémoire
+            # (merge en place ci-dessus). Le remettre à 0 forçait un
+            # RECHARGEMENT COMPLET de la base au prochain accès → en boucle
+            # (versement / envoi) = des milliers de relectures = l'essentiel de
+            # l'egress Supabase.
             return existing, False
         # Nouveau prospect
         row = prospect_to_row(prospect)
@@ -218,7 +228,8 @@ class RemoteCRM:
                     self._id_by_match.setdefault(k, new_id)
             self._cache.append(prospect)
         self._dirty = True
-        self._cache_at = 0.0
+        # idem : pas de remise à 0 du cache (le nouveau prospect vient d'être
+        # ajouté au cache mémoire + indexé juste au-dessus).
         return prospect, True
 
     def upsert_many(self, prospects: Iterable[Prospect]) -> dict:
