@@ -325,6 +325,36 @@ def clean_email(email: str) -> str | None:
     if not email or not isinstance(email, str):
         return None
     email = email.strip().lower()
+    if not email.isascii():
+        # Accents dans l'adresse (« andré.dupont@… ») : presque toujours un
+        # artefact d'affichage/OCR — la vraie boîte est la version sans
+        # accent. Ligatures d'abord (œ/æ/ø/ß n'ont PAS de décomposition
+        # NFKD), puis retrait des accents combinants. AVANT ce nettoyage,
+        # findall() ne prenait que le fragment ASCII et fabriquait une
+        # adresse invalide (« .dupont@… », « rgen@… » — rebond garanti).
+        email = (email.replace("œ", "oe").replace("æ", "ae")
+                      .replace("ø", "o").replace("ß", "ss"))
+        # Domaine accentué = domaine IDN : sa vraie forme est le punycode ;
+        # le « désaccentuer » fabriquerait un AUTRE domaine (rebond, voire
+        # mail au mauvais destinataire) → rejet.
+        if "@" in email and not email.rsplit("@", 1)[1].isascii():
+            return None
+        import unicodedata as _ud
+        email = "".join(ch for ch in _ud.normalize("NFKD", email)
+                        if not _ud.combining(ch))
+    if not email.isascii():
+        # Il reste des lettres sans équivalent ASCII : une adresse extraite
+        # là-dedans risque d'être un fragment tronqué. On ne la garde que si
+        # elle ne TOUCHE aucun caractère exotique.
+        sentinel = "".join(ch if ch.isascii() else "\x00" for ch in email)
+        m0 = _EMAIL_RE.search(sentinel)
+        if not m0:
+            return None
+        s0, e0 = m0.span()
+        if ((s0 > 0 and sentinel[s0 - 1] == "\x00")
+                or (e0 < len(sentinel) and sentinel[e0] == "\x00")):
+            return None
+        email = m0.group(0)
     m = _EMAIL_RE.fullmatch(email)
     if not m:
         # Tente d'extraire un email d'une chaîne polluée
@@ -336,6 +366,11 @@ def clean_email(email: str) -> str | None:
     try:
         local, domain = email.split("@", 1)
     except ValueError:
+        return None
+
+    # Local-part malformée (point en tête/queue, points doublés) : typique
+    # d'un fragment mal extrait — jamais une vraie boîte, rejet direct.
+    if local.startswith(".") or local.endswith(".") or ".." in local:
         return None
 
     # 1. Local-part toujours bidon (fragments type "more X on …")

@@ -55,7 +55,9 @@ def name_looks_polluted(name: str) -> bool:
         return False
     if len(n) > _NAME_MAX_REASONABLE:
         return True
-    m = re.match(r"^(.{2,60}?)\s*[.;|·]\s+(.{15,})$", n)
+    # « : » inclus : c'est LE séparateur des fiches Google Maps polluées
+    # (« FABBI PATRICK PEINTURE: Artisan peintre en bâtiment… »).
+    m = re.match(r"^(.{2,60}?)\s*[.;|·:—–]\s+(.{15,})$", n)
     return bool(m)
 
 
@@ -68,7 +70,7 @@ def split_polluted_name(name: str) -> tuple[str, str] | None:
     n = (name or "").strip()
     if not n:
         return None
-    m = re.match(r"^(.{2,60}?)\s*[.;|·]\s+(.{15,})$", n)
+    m = re.match(r"^(.{2,60}?)\s*[.;|·:—–]\s+(.{15,})$", n)
     if not m:
         return None
     clean = m.group(1).strip(" .,-—·|")
