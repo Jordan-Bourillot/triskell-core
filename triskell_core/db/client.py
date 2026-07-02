@@ -20,6 +20,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -433,6 +434,10 @@ class SupabaseClient:
                 "key": key,
                 "value": value,
                 "updated_by": self._user_id,
+                # Sans ce champ, l'upsert garde l'updated_at d'origine pour
+                # toujours : les curseurs IMAP paraissaient figés depuis mai
+                # alors que le poller tournait (diagnostic du 02/07/2026).
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             # Depuis la migration 20 (multi-tenant), shared_settings a une
             # colonne workspace_id NOT NULL et PK (workspace_id, key). Sans
