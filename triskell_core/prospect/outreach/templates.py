@@ -33,12 +33,12 @@ DEFAULT_TEMPLATES = {
             "remarqué quelques pistes simples qui pourraient vous faire gagner "
             "en crédibilité et en clients.\n\n"
             "On accompagne plusieurs entreprises {region_secteur} avec des "
-            "sites premium taillés sur mesure — pas de templates copiés-collés, "
+            "sites premium taillés sur mesure, pas de templates copiés-collés, "
             "juste du design qui vous ressemble.\n\n"
-            "Ça vous dit qu'on en discute 15 minutes cette semaine ? Je peux "
-            "vous montrer 2-3 pistes concrètes pour {nom_entreprise}.\n\n"
+            "Si le sujet vous intéresse, je peux vous envoyer par mail 2 ou 3 "
+            "pistes concrètes pour {nom_entreprise}, sans engagement.\n\n"
             "Bien cordialement,\n"
-            "{mon_prenom} — Triskell Studio"
+            "{mon_prenom}, Triskell Studio"
         ),
     },
     "tpe_relance_j5": {
@@ -46,10 +46,11 @@ DEFAULT_TEMPLATES = {
         "subject": "Re: Un site qui ressemble enfin à {nom_entreprise} ?",
         "body": (
             "Bonjour {prenom},\n\n"
-            "Je me permets une petite relance suite à mon précédent message — "
-            "je sais que tu reçois sûrement beaucoup de propositions.\n\n"
-            "Si le timing n'est pas bon en ce moment, fais-moi signe et on "
-            "reprendra contact plus tard. Sinon, je reste à dispo.\n\n"
+            "Je me permets une petite relance suite à mon précédent message. "
+            "Je sais que vous recevez sûrement beaucoup de propositions.\n\n"
+            "Si le moment n'est pas le bon, aucun souci, on pourra reprendre "
+            "contact plus tard. Et si vous avez la moindre question, j'y "
+            "réponds volontiers par mail.\n\n"
             "Bonne journée,\n"
             "{mon_prenom}"
         ),
