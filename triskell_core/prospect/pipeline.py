@@ -1678,6 +1678,30 @@ def _run_ai_outreach(
                         log(f"  -> config SMTP du compte '{sender_account_id}' "
                             f"absente -> brouillon")
 
+            # Filet identité multi-boîtes : avec un pool configuré, 'primary' ne
+            # doit JAMAIS porter le mail (sinon signature manquante, ou en local
+            # desktop la signature PERSO de Jordan collée sur un mail « nous »).
+            # - Un envoi AUTO qui retomberait sur 'primary' (pool en erreur au
+            #   tick) passe en brouillon : jamais un envoi non signé / mal signé.
+            # - Tout brouillon reçoit une vraie boîte du pool (adresse + signature
+            #   de la BONNE personne), même hors plafond (on n'envoie pas ici) :
+            #   la boîte est choisie de façon stable par prospect (réparti).
+            if pool and sender_account_id == "primary":
+                if effective_mode == MODE_AUTO:
+                    effective_mode = MODE_VALIDATION
+                    log("  -> pool configuré mais aucune boîte résolue -> "
+                        "brouillon (jamais un envoi 'primary')")
+                _pid_pick = str(getattr(prospect, "id", "") or "")
+                try:
+                    _pick_i = (int(_pid_pick.replace("-", "")[:8], 16)
+                               if _pid_pick else 0) % len(pool)
+                except Exception:
+                    _pick_i = 0
+                sender_account_id = pool[_pick_i]["account_id"]
+                _sc = (sender_pool_smtp or {}).get(sender_account_id)
+                if _sc:
+                    sender_smtp_cfg = _sc
+
             # Signature auto : la boîte expéditrice ajoute sa signature avant
             # envoi (et avant stockage en draft, pour que la validation montre
             # bien le mail final). L'IA s'arrête à "Cordialement, {prénom}" ;
@@ -1817,11 +1841,18 @@ def _run_ai_outreach(
                     "provider": cfg.ai_provider,
                     "model": cfg.ai_model,
                 }
-                # Câblage modèle→adresse : l'exigence suit le brouillon.
-                # À la validation, le mail partira par CE compte ou ne
-                # partira pas (même si le brouillon dort des jours).
-                if _tpl_from:
-                    _draft_payload["sender_address"] = _tpl_from
+                # Adresse d'expéditeur du brouillon : l'adresse EXIGÉE par le
+                # modèle si présente, sinon la boîte du pool choisie ci-dessus
+                # (filet identité). À la validation, le mail part depuis CE
+                # compte — donc la bonne personne, avec la signature déjà posée
+                # dans le corps. Sans ça, un brouillon 'primary' repartait non
+                # signé (câblage modèle→adresse : l'exigence suit le brouillon).
+                _draft_from = _tpl_from
+                if not _draft_from and sender_account_id != "primary":
+                    _draft_from = ((sender_pool_smtp or {})
+                                   .get(sender_account_id, {}) or {}).get("from_email") or ""
+                if _draft_from:
+                    _draft_payload["sender_address"] = _draft_from
                 # Embarque la note + le commentaire de la 2e IA dans le
                 # brouillon pour que l'UI les affiche cote validation
                 # manuelle (Jordan voit en un coup d'oeil les mails surs
