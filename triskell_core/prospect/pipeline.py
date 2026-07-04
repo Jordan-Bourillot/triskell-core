@@ -1690,6 +1690,19 @@ def _run_ai_outreach(
                 body = append_signature_to_body(body, account_id=sender_account_id)
             except Exception as _sig_exc:
                 log(f"  [WARN] signature non ajoutée ({_sig_exc})")
+            # Même signature côté HTML de MODÈLE : append_signature_to_body ne
+            # touche que le texte. Sans ça, un modèle HTML dont on a retiré la
+            # signature (envoi multi-boîtes signé par personne) partirait sans
+            # signature chez Gmail. Injecté ici, une fois la boîte choisie.
+            if _html_is_custom and body_html:
+                try:
+                    from triskell_command.integrations.signatures import (
+                        append_signature_to_html,
+                    )
+                    body_html = append_signature_to_html(
+                        body_html, account_id=sender_account_id)
+                except Exception as _sigh_exc:
+                    log(f"  [WARN] signature HTML non ajoutée ({_sigh_exc})")
 
             # === Mise en forme HTML legere (Auto-pilote v2) ===
             # Le HTML est (re)genere a partir du texte SIGNE, sauf si le
