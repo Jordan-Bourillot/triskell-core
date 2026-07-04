@@ -1851,6 +1851,20 @@ def _run_ai_outreach(
                 if not _draft_from and sender_account_id != "primary":
                     _draft_from = ((sender_pool_smtp or {})
                                    .get(sender_account_id, {}) or {}).get("from_email") or ""
+                    if not _draft_from:
+                        # SMTP du pool pas résolu au tick (hoquet base, secrets
+                        # pas encore synchro) : on retrouve QUAND MÊME l'adresse
+                        # de la boîte (mail_accounts) pour que le brouillon parte
+                        # de la BONNE personne à la validation. Sinon il porterait
+                        # la signature de X mais partirait de la boîte principale.
+                        try:
+                            from triskell_command.integrations import (
+                                shared_secrets as _ss,
+                            )
+                            _acc = _ss.get_account_by_id(sender_account_id)
+                            _draft_from = ((_acc or {}).get("from_email") or "")
+                        except Exception:
+                            _draft_from = ""
                 if _draft_from:
                     _draft_payload["sender_address"] = _draft_from
                 # Embarque la note + le commentaire de la 2e IA dans le
