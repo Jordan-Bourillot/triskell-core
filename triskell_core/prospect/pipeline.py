@@ -242,6 +242,25 @@ def _persist_prospect(crm, prospect) -> None:
         crm._dirty = True  # noqa: SLF001 — le crm.save() final écrit le fichier
 
 
+def _prospect_row_id(crm, prospect) -> str:
+    """Identifiant réel du prospect dans le CRM.
+
+    Sur la base partagée (Supabase), l'objet Prospect ne porte PAS son id
+    (`prospect.id` est vide) : le vrai id vit dans `crm.get_row_id(prospect)`.
+    Sans ça, tout ce qui hashe `prospect.id` (répartition des boîtes du pool,
+    lien de désinscription) retombe sur une valeur vide -> même boîte pour
+    tout le monde / lien de désinscription incomplet. On lit donc le row id
+    en priorité, avec repli sur l'attribut objet (CRM fichier local).
+    """
+    try:
+        rid = crm.get_row_id(prospect)
+        if rid:
+            return str(rid)
+    except Exception:
+        pass
+    return str(getattr(prospect, "id", "") or "")
+
+
 def _store_validation_draft(crm, prospect, payload: dict) -> bool:
     """Dépose un brouillon de validation dans la base partagée.
 
@@ -1691,9 +1710,19 @@ def _run_ai_outreach(
                     effective_mode = MODE_VALIDATION
                     log("  -> pool configuré mais aucune boîte résolue -> "
                         "brouillon (jamais un envoi 'primary')")
-                _pid_pick = str(getattr(prospect, "id", "") or "")
+                # Clé de répartition stable : le VRAI id du prospect (row id
+                # de la base partagée), sinon son email — jamais vide, sinon
+                # tout le monde tombe sur pool[0] (même boîte / même personne).
+                _pid_pick = _prospect_row_id(crm, prospect)
+                if not _pid_pick:
+                    try:
+                        _pid_pick = (prospect.emails[0] or "").strip().lower()
+                    except Exception:
+                        _pid_pick = ""
                 try:
-                    _pick_i = (int(_pid_pick.replace("-", "")[:8], 16)
+                    import hashlib as _hl
+                    _pick_i = (int(_hl.md5(_pid_pick.encode("utf-8"))
+                                   .hexdigest()[:8], 16)
                                if _pid_pick else 0) % len(pool)
                 except Exception:
                     _pick_i = 0
@@ -1774,7 +1803,8 @@ def _run_ai_outreach(
                 )
                 smtp_cfg = sender_smtp_cfg if sender_smtp_cfg else _load_smtp_config()
                 _to_addr = prospect.emails[0]
-                _pid = str(getattr(prospect, "id", "") or "")
+                # Vrai id (base partagée) pour un lien de désinscription complet.
+                _pid = _prospect_row_id(crm, prospect)
                 # Pied de désinscription cliquable (texte + HTML), lien signé
                 # propre au destinataire. Sans casser si le module est absent.
                 _send_body, _send_html = body, body_html
