@@ -88,6 +88,12 @@ def render(template_key: str, prospect, sender_vars: dict) -> tuple[str, str]:
     if main_name and main_name == main_name.upper():
         # ECO.PROTECH → Eco.Protech ; SARL MOUGIN → Sarl Mougin
         main_name = " ".join(w.capitalize() for w in main_name.split())
+    elif main_name:
+        # Nom entièrement en minuscules (« à la mesure du bois ») → casse
+        # « enseigne ». La casse mixte voulue est laissée intacte par la
+        # fonction (elle ne touche que les noms clairement fautifs).
+        from ..core.name_case import normalize_display_name
+        main_name = normalize_display_name(main_name)
     # "Prénom" approximatif si pas fourni explicitement
     prenom = (
         sender_vars.get("contact_prenom")
