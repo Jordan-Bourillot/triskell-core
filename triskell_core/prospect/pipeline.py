@@ -1428,6 +1428,12 @@ def _run_ai_outreach(
             _applied = False            # une retouche de la 2e IA a-t-elle ete appliquee ?
             _orig_body_for_html = None  # texte AVANT retouche (pour la reporter dans le HTML)
             if review_enabled:
+                # La 2e IA ne fait que NOTER/relire le mail : un petit modèle
+                # suffit largement. On force le modèle économique du provider
+                # (Haiku pour Anthropic) au lieu du modèle de rédaction ->
+                # même qualité de tri, coût par mail nettement réduit.
+                _review_model = (ai_providers.cheap_model_for(cfg.ai_provider)
+                                 or cfg.ai_model)
                 log({"type": "activity",
                      "message": f"La 2è IA relit le mail pour {_prospect_label}..."})
                 try:
@@ -1442,7 +1448,7 @@ def _run_ai_outreach(
                         subject=subject, body=body,
                         prospect_context=ctx,
                         provider=cfg.ai_provider,
-                        model=cfg.ai_model,
+                        model=_review_model,
                         api_keys=api_keys,
                         audience=prospect_audience,
                     )
@@ -1502,7 +1508,7 @@ def _run_ai_outreach(
                             review2 = review_email(
                                 subject=subject, body=_revised,
                                 prospect_context=ctx,
-                                provider=cfg.ai_provider, model=cfg.ai_model,
+                                provider=cfg.ai_provider, model=_review_model,
                                 api_keys=api_keys, audience=prospect_audience,
                             )
                         except Exception:

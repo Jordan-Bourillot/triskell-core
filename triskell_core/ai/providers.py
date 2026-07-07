@@ -181,10 +181,14 @@ PROVIDERS: dict[str, dict] = {
         "label": "Anthropic (Claude)",
         "key_field": "anthropic",
         "caller": call_anthropic,
+        # ⚠️ L'ORDRE COMPTE : models[0] est le modèle par défaut renvoyé par
+        # default_model_for(). Sonnet en tête, JAMAIS Opus : un appel qui
+        # oublie de préciser le modèle ne doit pas partir en Opus (le plus
+        # cher) par accident.
         "models": [
-            "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5",
+            "claude-opus-4-5",
             "claude-3-5-sonnet-latest",
             "claude-3-5-haiku-latest",
         ],
@@ -285,6 +289,25 @@ def default_model_for(provider_id: str) -> str:
     if not info or not info.get("models"):
         return ""
     return info["models"][0]
+
+
+# Modèle le moins cher « assez bon » de chaque provider, pour les tâches
+# SIMPLES (relire/noter un mail, trier, classer) où le gros modèle est du
+# pur gaspillage. Le jugement d'un mail ne demande pas Sonnet/Opus.
+CHEAP_MODEL: dict[str, str] = {
+    "anthropic": "claude-haiku-4-5",
+    "openai": "gpt-4o-mini",
+    "google": "gemini-2.5-flash-lite",
+    "mistral": "mistral-small-latest",
+    "xai": "grok-2-latest",
+    "deepseek": "deepseek-chat",
+}
+
+
+def cheap_model_for(provider_id: str) -> str:
+    """Modèle le moins cher 'assez bon' d'un provider pour les tâches simples.
+    Repli : le modèle par défaut du provider s'il n'est pas répertorié."""
+    return CHEAP_MODEL.get(provider_id) or default_model_for(provider_id)
 
 
 def send_with_fallback(
