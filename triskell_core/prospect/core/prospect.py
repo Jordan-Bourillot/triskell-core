@@ -326,6 +326,26 @@ class Prospect:
         # Status : ne jamais régresser un statut « avancé » par un import
         if _status_rank(other.status) > _status_rank(self.status):
             self.status = other.status
+        # Suivi par fiche que la fusion oubliait — bug du 06/07/2026 : au 1er
+        # envoi auto, 25 fiches sur 35 sont restées last_contact_at NULL alors
+        # que status passait bien à « contacted ». Cause : le cache du CRM
+        # partagé expire (600 s) ; l'upsert fusionne alors la fiche FRAÎCHE de
+        # la base (last_contact_at vide) avec l'objet d'envoi, et sérialise la
+        # fiche fraîche. Le status remontait via le rang ci-dessus, mais
+        # last_contact_at (absent de merge) était écrasé à NULL. On reporte
+        # donc explicitement l'horodatage de contact et l'échéance de relance.
+        # Garde-fou : uniquement si l'entrant est renseigné → la déduplication
+        # de recherche (prospect fraîchement scrappé, sans date) ne peut
+        # JAMAIS effacer une vraie date déjà en base.
+        _other_lca = getattr(other, "last_contact_at", "") or ""
+        if _other_lca and _other_lca > (self.last_contact_at or ""):
+            self.last_contact_at = _other_lca
+        _other_nfu = getattr(other, "next_follow_up_at", "") or ""
+        if _other_nfu:
+            self.next_follow_up_at = _other_nfu
+        for _f in ("contact_channel", "demo_url"):
+            if not getattr(self, _f, "") and getattr(other, _f, ""):
+                setattr(self, _f, getattr(other, _f))
         self.updated_at = datetime.now().isoformat(timespec="seconds")
         return self
 

@@ -168,6 +168,50 @@ class GuessedEmailTests(unittest.TestCase):
         self.assertEqual([p.name for p in lst], ["B", "A", "C"])
 
 
+class MergeContactTrackingTests(unittest.TestCase):
+    """Verrou du bug 06/07/2026 : merge() doit reporter last_contact_at.
+
+    Reproduit la fusion faite par l'upsert du CRM partagé après expiration
+    du cache : la fiche FRAÎCHE de la base (sans date de contact) fusionne
+    l'objet d'envoi qui vient d'être marqué « contacted » avec sa date.
+    Avant le fix, le status remontait mais last_contact_at était perdu.
+    """
+
+    def test_reporte_last_contact_at_sur_fiche_fraiche(self):
+        fraiche = Prospect(name="X", emails=["a@b.fr"], status="qualified")
+        envoi = Prospect(name="X", emails=["a@b.fr"], status="contacted",
+                         last_contact_at="2026-07-06T12:30:00")
+        fraiche.merge(envoi)
+        self.assertEqual(fraiche.status, "contacted")
+        self.assertEqual(fraiche.last_contact_at, "2026-07-06T12:30:00")
+
+    def test_dedup_recherche_n_efface_jamais_une_vraie_date(self):
+        # Fiche en base déjà contactée ; un prospect fraîchement scrappé
+        # (sans date) fusionne dedans → la vraie date doit survivre.
+        en_base = Prospect(name="X", emails=["a@b.fr"], status="contacted",
+                           last_contact_at="2026-07-01T09:00:00")
+        scrappe = Prospect(name="X", emails=["a@b.fr"], status="new")
+        en_base.merge(scrappe)
+        self.assertEqual(en_base.last_contact_at, "2026-07-01T09:00:00")
+
+    def test_garde_la_date_la_plus_recente(self):
+        a = Prospect(name="X", emails=["a@b.fr"],
+                     last_contact_at="2026-07-06T12:00:00")
+        b = Prospect(name="X", emails=["a@b.fr"],
+                     last_contact_at="2026-07-01T08:00:00")
+        a.merge(b)
+        self.assertEqual(a.last_contact_at, "2026-07-06T12:00:00")
+
+    def test_reporte_next_follow_up_et_canal(self):
+        fraiche = Prospect(name="X", emails=["a@b.fr"])
+        envoi = Prospect(name="X", emails=["a@b.fr"],
+                         next_follow_up_at="2026-07-13T09:00:00",
+                         contact_channel="email")
+        fraiche.merge(envoi)
+        self.assertEqual(fraiche.next_follow_up_at, "2026-07-13T09:00:00")
+        self.assertEqual(fraiche.contact_channel, "email")
+
+
 class ProspectionHeadersTests(unittest.TestCase):
     def test_pose_list_unsubscribe(self):
         h = prospection_headers("pro@triskell-studio.fr")
