@@ -1682,7 +1682,16 @@ def _run_ai_outreach(
                                        - pool_counts_24h.get(p["account_id"], 0))}
                     for p in pool
                 ]
-                chosen = pool_tracker.pick_random_available_account(pool_with_remaining)
+                # pool_with_remaining porte DÉJÀ la marge restante (cap - envois
+                # 24h init base + incréments in-run). On tire donc directement
+                # parmi les boîtes à marge > 0. Repasser par
+                # pick_random_available_account relirait la base et
+                # re-soustrairait les envois -> DOUBLE COMPTAGE (boîtes vues
+                # « pleines » à la moitié du cap : 5 au lieu de 10).
+                import random as _rnd_pool
+                _avail_boxes = [p for p in pool_with_remaining
+                                if int(p.get("daily_cap") or 0) > 0]
+                chosen = _rnd_pool.choice(_avail_boxes) if _avail_boxes else None
                 if chosen is None:
                     # Toutes les adresses du pool sont saturees -> brouillon
                     effective_mode = MODE_VALIDATION
@@ -1730,6 +1739,26 @@ def _run_ai_outreach(
                 _sc = (sender_pool_smtp or {}).get(sender_account_id)
                 if _sc:
                     sender_smtp_cfg = _sc
+
+            # Marque par boîte : les modèles sont rédigés « Triskell Studio »
+            # (marque mère). Une boîte d'une autre marque maison (WoW, RankUs,
+            # La Griffe) envoie sous SON nom -> on échange la marque dans le
+            # corps déjà rédigé. Le CTA, le lien et l'offre Pixel Pros ne
+            # bougent pas (Pixel Pros reste le produit proposé). Fait APRÈS la
+            # relecture 2e IA (qui a vu un texte propre) et juste avant la
+            # signature (elle aussi propre à la boîte, via account_id).
+            _BOX_BRAND = {
+                "wow":      "Studio WoW",
+                "rankus":   "RankUs Studio",
+                "lagriffe": "Lagriffe Studio",
+            }
+            _brand = _BOX_BRAND.get(sender_account_id, "")
+            if _brand:
+                body = ((body or "").replace("TRISKELL STUDIO", _brand.upper())
+                                    .replace("Triskell Studio", _brand))
+                if body_html:
+                    body_html = (body_html.replace("TRISKELL STUDIO", _brand.upper())
+                                          .replace("Triskell Studio", _brand))
 
             # Signature auto : la boîte expéditrice ajoute sa signature avant
             # envoi (et avant stockage en draft, pour que la validation montre
