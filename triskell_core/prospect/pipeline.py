@@ -1373,6 +1373,44 @@ def _run_ai_outreach(
                     if _by_cat:
                         templates_for_this_prospect = _by_cat
 
+            # Aiguillage par OFFRE (08/07/2026, lancement La Part de Voix).
+            # Deux offres partagent la base : les sites (Pixel Pros...) et
+            # La Part de Voix (courtiers, experts-comptables, avocats,
+            # agences immo AVEC site). Règle absolue : un prospect d'une
+            # offre ne reçoit JAMAIS un modèle de l'autre. Tant que les
+            # modèles Part de Voix ne sont pas armés au catalogue, ce bloc
+            # ne change rigoureusement rien au comportement existant.
+            if use_templates and templates_for_this_prospect:
+                _lpv_pool = [t for t in templates_for_this_prospect
+                             if (t.get("product") or "").strip()
+                             == PARTDEVOIX_PRODUCT]
+                if _lpv_pool:
+                    if _offer_product_for(prospect) == PARTDEVOIX_PRODUCT:
+                        templates_for_this_prospect = _lpv_pool
+                        _seg = _partdevoix_segment(prospect.industry or "")
+                        _by_seg = [t for t in _lpv_pool
+                                   if _seg and _seg in (t.get("key") or "").lower()]
+                        if _by_seg:
+                            templates_for_this_prospect = _by_seg
+                    else:
+                        _hors_lpv = [t for t in templates_for_this_prospect
+                                     if (t.get("product") or "").strip()
+                                     != PARTDEVOIX_PRODUCT]
+                        if _hors_lpv:
+                            templates_for_this_prospect = _hors_lpv
+                        else:
+                            # Aucun modèle de la bonne offre : on saute ce
+                            # prospect plutôt que de lui écrire pour la
+                            # mauvaise (mail hors sujet = marque grillée).
+                            log(f"  [skip] (aiguillage par offre) : aucun "
+                                f"modele hors Part de Voix pour ce metier, "
+                                f"prospect saute ce run")
+                            log({"type": "prospect_touched",
+                                 "id": getattr(prospect, "id", ""),
+                                 "name": _prospect_label, "action": "skipped",
+                                 "reason": "aucun modele de la bonne offre"})
+                            continue
+
             _html_is_custom = False
             if use_templates and templates_for_this_prospect:
                 # === Mode templates : pioche le bon modele puis adapte ===
@@ -2125,6 +2163,48 @@ def _looks_like_ai_refusal(body: str) -> bool:
         "je manque d'info pour",
     )
     return any(m in head for m in markers)
+
+
+PARTDEVOIX_PRODUCT = "la-part-de-voix"
+
+
+def _partdevoix_segment(secteur: str) -> str:
+    """Segment « La Part de Voix » d'un métier : 'courtier', 'comptable',
+    'avocat', 'immo', ou "" si le métier ne relève pas de cette offre.
+    Même normalisation que _pro_category (accents, œ, apostrophes)."""
+    import unicodedata
+    base = (secteur or "").lower().replace("œ", "oe").replace("æ", "ae")
+    s = "".join(c for c in unicodedata.normalize("NFD", base)
+                if unicodedata.category(c) != "Mn")
+    s = s.replace("’", "'")
+    if any(k in s for k in ("courtier", "courtage", "iobsp")):
+        return "courtier"
+    if any(k in s for k in ("expert-comptable", "expert comptable",
+                            "expertise comptable", "comptab")):
+        return "comptable"
+    if "avocat" in s:
+        return "avocat"
+    if any(k in s for k in ("agence immobiliere", "agent immobilier",
+                            "mandataire immo", "immobilier", "immobiliere")):
+        return "immo"
+    return ""
+
+
+def _offer_product_for(prospect: Prospect) -> str:
+    """Produit exigé par la fiche ("" = pas d'exigence, offres sites).
+
+    Courtiers, experts-comptables, avocats et agences immobilières AVEC un
+    site vont à La Part de Voix (le service travaille un site existant).
+    Ces mêmes métiers SANS site restent sur les offres sites : on ne peut
+    pas travailler la part de voix d'un site qui n'existe pas, et leur
+    besoin naturel est d'abord le site. La cohérence vaut dans les deux sens.
+    """
+    seg = _partdevoix_segment(prospect.industry or "")
+    if not seg:
+        return ""
+    if not (getattr(prospect, "website", "") or "").strip():
+        return ""
+    return PARTDEVOIX_PRODUCT
 
 
 def _detect_audience(prospect: Prospect, cfg: PipelineConfig) -> str:
