@@ -425,6 +425,13 @@ class PipelineStats:
     started_at: str = ""
     finished_at: str = ""
     searched: int = 0
+    # Fiches trouvées par la recherche mais écartées AVANT insertion :
+    # sans adresse mail (politique du 11/06/2026 — une fiche muette ne
+    # sert à rien, et le verrou base la refuserait de toute façon).
+    skipped_no_email: int = 0
+    # Fiches refusées par la base à l'insertion (verrou, contrainte…) :
+    # sautées une par une, l'étape search continue (bug du 08/07/2026).
+    search_rejected: int = 0
     enriched: int = 0
     enrich_emails_found: int = 0
     drafts_generated: int = 0
@@ -588,13 +595,19 @@ def run_full_pipeline(
         try:
             crm = _pipeline_crm(log)
             iterator, finalize = _search_iterator(cfg, log=log)
-            before = len(crm)
-            r = crm.upsert_many(iterator)
+            # Versement UN PAR UN, sous blindage (cf _upsert_search_results) :
+            # filtre les fiches sans mail en amont, et une fiche refusée par
+            # la base ne tue plus toute l'étape (bug Éclaireur du 08/07/2026).
+            r = _upsert_search_results(crm, iterator, log)
             crm.save()
             stats.searched = r.get("created", 0)
+            stats.skipped_no_email = r.get("skipped_no_email", 0)
+            stats.search_rejected = r.get("rejected", 0)
             log(f"  → {stats.searched} nouveau(x) prospect(s) ({r.get('merged', 0)} fusionnés)")
+            _no_mail = (f" — {stats.skipped_no_email} ignoré(s) (sans adresse mail)"
+                        if stats.skipped_no_email else "")
             log({"type": "stage_done", "id": "search", "count": stats.searched,
-                 "message": f"{stats.searched} nouveau(x) prospect(s) ajouté(s) à la base"})
+                 "message": f"{stats.searched} nouveau(x) prospect(s) ajouté(s) à la base{_no_mail}"})
             try:
                 finalize()
             except Exception as e:
@@ -851,6 +864,75 @@ def _search_iterator(cfg: PipelineConfig, *, log: Callable[[str], None] | None =
         return iterator, finalize_obelisk
 
     return iter([]), (lambda: None)
+
+
+def _has_any_email(prospect) -> bool:
+    """True si la fiche porte au moins UNE adresse mail non vide."""
+    try:
+        return any((e or "").strip() for e in (prospect.emails or []))
+    except Exception:
+        return False
+
+
+def _upsert_search_results(crm, prospects, log: Callable[[str], None]) -> dict:
+    """Verse les prospects trouvés par l'étape search dans le CRM, un par un.
+
+    Remplace le `crm.upsert_many(iterator)` d'un bloc : depuis le verrou
+    base `prospect_sans_email` (migration 47, 11/06/2026), la PREMIÈRE
+    fiche sans mail rejetée faisait remonter l'exception et tuait TOUTE
+    l'étape search (bug Éclaireur du 08/07/2026 : searched=0 en 11 s).
+    Deux garde-fous, dans l'ordre :
+
+    1. Filtre en amont : une fiche trouvée SANS adresse mail n'est pas
+       envoyée à l'insertion. Politique maison (« une fiche muette ne sert
+       à rien, tous les outils filtrent en amont ») — on l'écarte et on la
+       compte au lieu de laisser la base la refuser.
+    2. Blindage individuel : chaque insertion a son propre try/except.
+       Si la base rejette UNE fiche (verrou prospect_sans_email, autre
+       contrainte, hoquet réseau), on la saute et on continue — on ne tue
+       JAMAIS toute l'étape pour une seule fiche.
+
+    Renvoie {created, merged, skipped_no_email, rejected} — mêmes clés
+    created/merged que crm.upsert_many(), plus les deux compteurs d'écart.
+    """
+    created = 0
+    merged = 0
+    skipped_no_email = 0
+    rejected = 0
+    for p in prospects:
+        if not _has_any_email(p):
+            skipped_no_email += 1
+            continue
+        try:
+            _, is_new = crm.upsert(p)
+        except Exception as exc:
+            rejected += 1
+            _msg = str(exc)
+            # Verrou base « prospect_sans_email » (code SQL 23514) : message
+            # dédié ; toute autre erreur d'insert est résumée telle quelle.
+            _why = ("refusée par le verrou base (fiche sans adresse mail)"
+                    if ("prospect_sans_email" in _msg or "23514" in _msg)
+                    else _msg[:120])
+            _name = (getattr(p, "name", "") or getattr(p, "legal_name", "")
+                     or "(sans nom)")[:40]
+            log(f"  [skip] fiche « {_name} » non insérée : {_why}")
+            logger.debug("insert prospect rejeté (%s) : %s", _name, exc)
+            continue
+        if is_new:
+            created += 1
+        else:
+            merged += 1
+    if skipped_no_email:
+        log(f"  → {skipped_no_email} ignoré(s) (sans adresse mail)")
+    if rejected:
+        log(f"  ⚠ {rejected} fiche(s) refusée(s) par la base — sautée(s), "
+            f"l'étape continue")
+    return {
+        "created": created,
+        "merged": merged,
+        "skipped_no_email": skipped_no_email,
+        "rejected": rejected,
+    }
 
 
 def _run_enrichment(cfg: PipelineConfig, log: Callable[[str], None]) -> tuple[int, int]:
