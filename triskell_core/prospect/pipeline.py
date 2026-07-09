@@ -2177,7 +2177,14 @@ def _partdevoix_segment(secteur: str) -> str:
     s = "".join(c for c in unicodedata.normalize("NFD", base)
                 if unicodedata.category(c) != "Mn")
     s = s.replace("’", "'")
+    # Faux amis attrapés en production (09/07/2026) : le diagnostiqueur
+    # immobilier et le courtier en travaux/énergie sont des métiers Pixel
+    # Pros, PAS des cibles Porte-Voix — malgré les mots qu'ils partagent.
+    if any(k in s for k in ("diagnost", "dpe")):
+        return ""
     if any(k in s for k in ("courtier", "courtage", "iobsp")):
+        if any(k in s for k in ("travaux", "energie", "demenag")):
+            return ""
         return "courtier"
     if any(k in s for k in ("expert-comptable", "expert comptable",
                             "expertise comptable", "comptab")):
