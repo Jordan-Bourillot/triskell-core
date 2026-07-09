@@ -1392,6 +1392,45 @@ def _run_ai_outreach(
                                    if _seg and _seg in (t.get("key") or "").lower()]
                         if _by_seg:
                             templates_for_this_prospect = _by_seg
+                        # Aiguillage par ISSUE d'audit (09/07/2026). Chaque
+                        # prospect Porte-Voix reçoit le mail qui correspond
+                        # à SON audit, et JAMAIS de mail sans audit généré
+                        # (un mail qui promet un relevé inexistant = une
+                        # promesse cassée au premier contact).
+                        _issue = ""
+                        try:
+                            from triskell_command.integrations.partdevoix \
+                                import liens as _pdv_liens
+                            _issue = _pdv_liens.issue_for(
+                                email=(prospect.emails[0]
+                                       if prospect.emails else ""),
+                                entreprise=prospect.name or "",
+                                ville=prospect.city or "")
+                        except Exception as _exc_liens:
+                            log(f"  [WARN] index des audits illisible "
+                                f"({_exc_liens})")
+                        if not _issue:
+                            log(f"  [skip] (Porte-Voix) : audit non genere "
+                                f"pour cette fiche, prospect saute ce run")
+                            log({"type": "prospect_touched",
+                                 "id": getattr(prospect, "id", ""),
+                                 "name": _prospect_label,
+                                 "action": "skipped",
+                                 "reason": "audit Porte-Voix non genere"})
+                            continue
+                        _par_issue = _filtrer_par_issue(
+                            templates_for_this_prospect, _issue)
+                        if _par_issue:
+                            templates_for_this_prospect = _par_issue
+                        else:
+                            log(f"  [skip] (Porte-Voix) : aucun modele pour "
+                                f"l'issue '{_issue}', prospect saute ce run")
+                            log({"type": "prospect_touched",
+                                 "id": getattr(prospect, "id", ""),
+                                 "name": _prospect_label,
+                                 "action": "skipped",
+                                 "reason": f"aucun modele issue {_issue}"})
+                            continue
                     else:
                         _hors_lpv = [t for t in templates_for_this_prospect
                                      if (t.get("product") or "").strip()
@@ -2166,6 +2205,26 @@ def _looks_like_ai_refusal(body: str) -> bool:
 
 
 PARTDEVOIX_PRODUCT = "la-part-de-voix"
+
+
+def _filtrer_par_issue(templates: list, issue: str) -> list:
+    """Ne garde que les modèles Porte-Voix qui correspondent à l'ISSUE de
+    l'audit du prospect. Convention des clés : « _deja » = prospect déjà
+    cité par les IA, « _vide » = personne n'est cité, sans marqueur =
+    concurrents cités (le mail « vous n'y apparaissez pas »).
+
+    Règle d'honnêteté : on n'écrit jamais « votre nom n'apparaît pas » à
+    quelqu'un qui apparaît — un prospect qui vérifierait nous grillerait."""
+    def _cle(t):
+        return (t.get("key") or "").lower()
+
+    if issue == "deja_cite":
+        return [t for t in templates if "_deja" in _cle(t)]
+    if issue == "vide":
+        return [t for t in templates if "_vide" in _cle(t)]
+    # concurrents cités = les modèles « par défaut », sans marqueur d'issue
+    return [t for t in templates
+            if "_deja" not in _cle(t) and "_vide" not in _cle(t)]
 
 
 def _partdevoix_segment(secteur: str) -> str:
